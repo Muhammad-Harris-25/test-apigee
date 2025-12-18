@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
 
       # ==============================
-      # DETECT PROXIES
+      # DETECT PROXIES (FIXED)
       # ==============================
       - name: Detect changed proxies
         id: detect
@@ -37,7 +37,10 @@ jobs:
             | cut -d'/' -f2 \
             | sort -u)
 
-          echo "CHANGED=$CHANGED" >> $GITHUB_ENV
+          # Convert newline → space (IMPORTANT)
+          CHANGED_SPACES=$(echo "$CHANGED" | tr '\n' ' ')
+
+          echo "CHANGED=$CHANGED_SPACES" >> $GITHUB_ENV
 
           echo "======================================"
           echo "🔍 DETECTED APIGEE PROXIES"
@@ -52,7 +55,7 @@ jobs:
           fi
 
       # ==============================
-      # PUBLISH SUMMARY (VISIBLE UI)
+      # PUBLISH SUMMARY (UI)
       # ==============================
       - name: Publish detected proxies (Summary)
         if: always()

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       proxies:
-        description: "Copy proxy names from the Detect workflow summary (comma-separated)"
+        description: "Copy proxy names from Detect workflow summary (comma-separated)"
         required: true
 
 env:
@@ -65,7 +65,8 @@ jobs:
             fi
           done
 
-          echo "VALID_PROXIES=$(echo "${SELECTED[*]}")" >> $GITHUB_ENV
+          VALID_PROXIES=$(echo "${SELECTED[*]}")
+          echo "VALID_PROXIES=$VALID_PROXIES" >> $GITHUB_ENV
           echo "✅ Proxy selection validated"
 
       # ==============================
