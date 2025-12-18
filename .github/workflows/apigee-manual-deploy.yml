@@ -1,0 +1,164 @@
+name: Apigee - Manual Deploy Selected Proxies
+
+on:
+  workflow_dispatch:
+    inputs:
+      proxies:
+        description: "Comma-separated proxy names (e.g. test-call,test-proxy1)"
+        required: true
+
+env:
+  NODE_VERSION: 18
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ==========================================================
+      # 0️⃣ CHECKOUT
+      # ==========================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ==========================================================
+      # 1️⃣ LOAD VARIABLES
+      # ==========================================================
+      - name: Load Apigee variables
+        shell: bash
+        run: |
+          echo "ORG=${{ vars.ORG }}" >> $GITHUB_ENV
+          echo "APIGEE_ENVIRONMENT=${{ vars.APIGEE_ENVIRONMENT }}" >> $GITHUB_ENV
+          echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
+
+      # ==========================================================
+      # 2️⃣ CREATE SERVICE ACCOUNT FILE
+      # ==========================================================
+      - name: Create service account file
+        shell: bash
+        run: |
+          echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
+          chmod 600 "$SERVICE_ACCOUNT_FILE"
+
+      # ==========================================================
+      # 3️⃣ SETUP TOOLS
+      # ==========================================================
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 11
+
+      - name: Install tools
+        run: |
+          npm install -g apigeelint newman newman-reporter-html
+
+      # ==========================================================
+      # 4️⃣ GENERATE ACCESS TOKEN (AZURE SCRIPT)
+      # ==========================================================
+      - name: Generate access token
+        shell: bash
+        run: |
+          chmod +x scripts/revision.sh
+
+          FIRST_PROXY=$(echo "${{ github.event.inputs.proxies }}" | cut -d',' -f1)
+
+          OUTPUT=$(scripts/revision.sh \
+            "$ORG" \
+            "$FIRST_PROXY" \
+            "$APIGEE_ENVIRONMENT" \
+            "$SERVICE_ACCOUNT_FILE" 2>&1)
+
+          TOKEN=$(echo "$OUTPUT" \
+            | sed -n 's/.*variable=access_token;isOutput=true]\(.*\)/\1/p')
+
+          if [ -z "$TOKEN" ]; then
+            echo "❌ Failed to get access token"
+            exit 1
+          fi
+
+          echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
+
+      # ==========================================================
+      # 5️⃣ LINT + DEPLOY + INTEGRATION
+      # ==========================================================
+      - name: Lint, Deploy & Integration
+        shell: bash
+        run: |
+          mkdir -p reports
+
+          HAS_FAILURE=0
+          SUCCESS=""
+          FAILED_LINT=""
+          FAILED_DEPLOY=""
+          FAILED_INTEGRATION=""
+
+          IFS=',' read -r -a PROXIES <<< "${{ github.event.inputs.proxies }}"
+
+          for proxy in "${PROXIES[@]}"; do
+            proxy=$(echo "$proxy" | xargs)
+            echo "🚦 Processing $proxy"
+
+            PROXY_DIR="api-proxies/$proxy/apiproxy"
+            POM_FILE="api-proxies/$proxy/pom.xml"
+            TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
+
+            apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex
+            if [ $? -ne 0 ]; then
+              FAILED_LINT="$FAILED_LINT $proxy"
+              HAS_FAILURE=1
+              continue
+            fi
+
+            mvn clean install \
+              -f "$POM_FILE" \
+              -P$APIGEE_ENVIRONMENT \
+              -Dorg=$ORG \
+              -Dbearer=$ACCESS_TOKEN
+
+            if [ $? -ne 0 ]; then
+              FAILED_DEPLOY="$FAILED_DEPLOY $proxy"
+              HAS_FAILURE=1
+              continue
+            fi
+
+            if [ -f "$TEST_FILE" ]; then
+              newman run "$TEST_FILE"
+              if [ $? -ne 0 ]; then
+                FAILED_INTEGRATION="$FAILED_INTEGRATION $proxy"
+                HAS_FAILURE=1
+                continue
+              fi
+            fi
+
+            SUCCESS="$SUCCESS $proxy"
+          done
+
+          echo "SUCCESS=$SUCCESS" >> $GITHUB_ENV
+          echo "FAILED_LINT=$FAILED_LINT" >> $GITHUB_ENV
+          echo "FAILED_DEPLOY=$FAILED_DEPLOY" >> $GITHUB_ENV
+          echo "FAILED_INTEGRATION=$FAILED_INTEGRATION" >> $GITHUB_ENV
+
+          if [ $HAS_FAILURE -eq 1 ]; then
+            exit 1
+          fi
+
+      # ==========================================================
+      # 6️⃣ FINAL SUMMARY
+      # ==========================================================
+      - name: Final Summary
+        if: always()
+        shell: bash
+        run: |
+          echo ""
+          echo "🚀 FINAL SUMMARY"
+          echo "=============================="
+          echo "✅ SUCCESS: ${SUCCESS:-None}"
+          echo "❌ LINT FAILED: ${FAILED_LINT:-None}"
+          echo "❌ DEPLOY FAILED: ${FAILED_DEPLOY:-None}"
+          echo "❌ INTEGRATION FAILED: ${FAILED_INTEGRATION:-None}"
