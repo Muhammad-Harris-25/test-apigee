@@ -1,11 +1,19 @@
-name: Apigee - Manual Deploy Selected Proxies
+name: Apigee - Manual Deploy Proxies
 
 on:
   workflow_dispatch:
     inputs:
-      proxies:
-        description: "Copy proxy names from Detect workflow summary (comma-separated)"
+      deploy_mode:
+        description: "Choose deployment mode"
         required: true
+        default: manual
+        type: choice
+        options:
+          - manual
+          - random
+      proxies:
+        description: "Comma-separated proxy names (required if manual)"
+        required: false
 
 env:
   NODE_VERSION: 18
@@ -15,63 +23,84 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ==============================
+      # =========================
       # CHECKOUT
-      # ==============================
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      # =========================
+      - uses: actions/checkout@v4
 
-      # ==============================
-      # LOAD VARIABLES
-      # ==============================
-      - name: Load Apigee variables
+      # =========================
+      # DOWNLOAD DETECTED PROXIES
+      # =========================
+      - uses: actions/download-artifact@v4
+        with:
+          name: detected-proxies
+
+      - name: Load detected proxies
         shell: bash
+        run: |
+          if [ ! -f detected_proxies.txt ]; then
+            echo "❌ detected_proxies.txt not found"
+            exit 1
+          fi
+
+          DETECTED=$(cat detected_proxies.txt)
+          echo "Detected proxies:"
+          echo "$DETECTED"
+
+          echo "DETECTED=$DETECTED" >> $GITHUB_ENV
+
+      # =========================
+      # SELECT PROXIES
+      # =========================
+      - name: Select target proxies
+        shell: bash
+        run: |
+          MODE="${{ github.event.inputs.deploy_mode }}"
+
+          if [ "$MODE" = "random" ]; then
+            IFS=$'\n' read -r -d '' -a ARR <<< "$DETECTED"$'\0'
+            SELECTED=${ARR[$RANDOM % ${#ARR[@]}]}
+            echo "🎯 Randomly selected: $SELECTED"
+
+          else
+            if [ -z "${{ github.event.inputs.proxies }}" ]; then
+              echo "❌ proxies input required for manual mode"
+              exit 1
+            fi
+
+            IFS=',' read -r -a USER <<< "${{ github.event.inputs.proxies }}"
+            for p in "${USER[@]}"; do
+              p=$(echo "$p" | xargs)
+              if ! echo "$DETECTED" | grep -qw "$p"; then
+                echo "❌ Invalid proxy: $p"
+                exit 1
+              fi
+              SELECTED="$SELECTED $p"
+            done
+          fi
+
+          echo "TARGET_PROXIES=$SELECTED" >> $GITHUB_ENV
+
+      # =========================
+      # LOAD APIGEE VARIABLES
+      # =========================
+      - name: Load Apigee variables
         run: |
           echo "ORG=${{ vars.ORG }}" >> $GITHUB_ENV
           echo "APIGEE_ENVIRONMENT=${{ vars.APIGEE_ENVIRONMENT }}" >> $GITHUB_ENV
           echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
 
-      # ==============================
+      # =========================
       # CREATE SERVICE ACCOUNT FILE
-      # ==============================
+      # =========================
       - name: Create service account file
-        shell: bash
         run: |
           echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
           chmod 600 "$SERVICE_ACCOUNT_FILE"
 
-      # ==============================
-      # VALIDATE SELECTED PROXIES
-      # ==============================
-      - name: Validate selected proxies
-        shell: bash
-        run: |
-          DETECTED=$(ls api-proxies | sort)
-          IFS=',' read -r -a SELECTED <<< "${{ github.event.inputs.proxies }}"
-
-          echo "Detected proxies:"
-          echo "$DETECTED"
-          echo ""
-          echo "Selected proxies:"
-          printf '%s\n' "${SELECTED[@]}"
-
-          for p in "${SELECTED[@]}"; do
-            p=$(echo "$p" | xargs)
-            if ! echo "$DETECTED" | grep -qw "$p"; then
-              echo "❌ Invalid proxy selected: $p"
-              exit 1
-            fi
-          done
-
-          VALID_PROXIES=$(echo "${SELECTED[*]}")
-          echo "VALID_PROXIES=$VALID_PROXIES" >> $GITHUB_ENV
-          echo "✅ Proxy selection validated"
-
-      # ==============================
+      # =========================
       # SETUP TOOLS
-      # ==============================
+      # =========================
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -82,120 +111,73 @@ jobs:
           java-version: 11
 
       - name: Install tools
-        run: |
-          npm install -g apigeelint newman newman-reporter-html
+        run: npm install -g apigeelint newman newman-reporter-html
 
-      # ==============================
+      # =========================
       # GENERATE ACCESS TOKEN
-      # ==============================
+      # =========================
       - name: Generate access token
         shell: bash
         run: |
           chmod +x scripts/revision.sh
-
-          FIRST_PROXY=$(echo "$VALID_PROXIES" | awk '{print $1}')
+          FIRST=$(echo "$TARGET_PROXIES" | awk '{print $1}')
 
           OUTPUT=$(scripts/revision.sh \
             "$ORG" \
-            "$FIRST_PROXY" \
+            "$FIRST" \
             "$APIGEE_ENVIRONMENT" \
             "$SERVICE_ACCOUNT_FILE" 2>&1)
 
-          TOKEN=$(echo "$OUTPUT" \
-            | sed -n 's/.*variable=access_token;isOutput=true]\(.*\)/\1/p')
+          TOKEN=$(echo "$OUTPUT" | sed -n 's/.*variable=access_token;isOutput=true]\(.*\)/\1/p')
 
           if [ -z "$TOKEN" ]; then
-            echo "❌ Failed to get access token"
+            echo "❌ Token generation failed"
             exit 1
           fi
 
           echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
 
-      # ==============================
-      # LINT + DEPLOY + INTEGRATION
-      # ==============================
+      # =========================
+      # LINT + DEPLOY + TEST
+      # =========================
       - name: Lint, Deploy & Integration
         shell: bash
         run: |
-          mkdir -p reports
-
           SUCCESS=""
-          FAILED_LINT=""
-          FAILED_DEPLOY=""
-          FAILED_INTEGRATION=""
+          FAILED=""
           HAS_FAILURE=0
 
-          IFS=' ' read -r -a PROXIES <<< "$VALID_PROXIES"
+          for proxy in $TARGET_PROXIES; do
+            echo "🚀 Processing $proxy"
 
-          for proxy in "${PROXIES[@]}"; do
-            echo "===================================="
-            echo "🚦 Processing $proxy"
-            echo "===================================="
-
-            PROXY_DIR="api-proxies/$proxy/apiproxy"
-            POM_FILE="api-proxies/$proxy/pom.xml"
-            TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
-
-            apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex
-            if [ $? -ne 0 ]; then
-              FAILED_LINT="$FAILED_LINT $proxy"
-              HAS_FAILURE=1
-              continue
-            fi
+            apigeelint -s api-proxies/$proxy/apiproxy || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
 
             mvn clean install \
-              -f "$POM_FILE" \
+              -f api-proxies/$proxy/pom.xml \
               -P$APIGEE_ENVIRONMENT \
               -Dorg=$ORG \
-              -Dbearer=$ACCESS_TOKEN
+              -Dbearer=$ACCESS_TOKEN || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
 
-            if [ $? -ne 0 ]; then
-              FAILED_DEPLOY="$FAILED_DEPLOY $proxy"
-              HAS_FAILURE=1
-              continue
-            fi
-
-            if [ -f "$TEST_FILE" ]; then
-              newman run "$TEST_FILE"
-              if [ $? -ne 0 ]; then
-                FAILED_INTEGRATION="$FAILED_INTEGRATION $proxy"
-                HAS_FAILURE=1
-                continue
-              fi
+            if [ -f api-proxies/$proxy/tests/integration/PassCollection.json ]; then
+              newman run api-proxies/$proxy/tests/integration/PassCollection.json || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; }
             fi
 
             SUCCESS="$SUCCESS $proxy"
           done
 
           echo "SUCCESS=$SUCCESS" >> $GITHUB_ENV
-          echo "FAILED_LINT=$FAILED_LINT" >> $GITHUB_ENV
-          echo "FAILED_DEPLOY=$FAILED_DEPLOY" >> $GITHUB_ENV
-          echo "FAILED_INTEGRATION=$FAILED_INTEGRATION" >> $GITHUB_ENV
+          echo "FAILED=$FAILED" >> $GITHUB_ENV
 
-          if [ $HAS_FAILURE -eq 1 ]; then
-            exit 1
-          fi
+          [ $HAS_FAILURE -eq 1 ] && exit 1
 
-      # ==============================
+      # =========================
       # FINAL SUMMARY
-      # ==============================
+      # =========================
       - name: Final Summary
         if: always()
-        shell: bash
         run: |
-          echo ""
-          echo "======================================"
-          echo "🚀 FINAL PIPELINE SUMMARY"
-          echo "======================================"
-          echo ""
-          echo "✅ SUCCESS:"
-          echo "${SUCCESS:-None}"
-          echo ""
-          echo "❌ LINT FAILED:"
-          echo "${FAILED_LINT:-None}"
-          echo ""
-          echo "❌ DEPLOY FAILED:"
-          echo "${FAILED_DEPLOY:-None}"
-          echo ""
-          echo "❌ INTEGRATION FAILED:"
-          echo "${FAILED_INTEGRATION:-None}"
+          echo "=============================="
+          echo "🚀 FINAL SUMMARY"
+          echo "=============================="
+          echo "✅ SUCCESS: ${SUCCESS:-None}"
+          echo "❌ FAILED: ${FAILED:-None}"
