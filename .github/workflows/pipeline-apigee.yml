@@ -1,11 +1,8 @@
-name: Apigee CI/CD Pipeline
+name: Apigee CI/CD Pipeline (Full Debug)
 
 on:
   push:
-    branches:
-      - dev
-      - uat
-      - prod
+    branches: [ dev, uat, prod ]
     paths-ignore:
       - README.md
       - shared-pom.xml
@@ -23,91 +20,138 @@ jobs:
 
     steps:
       # ==========================================================
-      # 0️⃣ CHECKOUT
+      # 0️⃣ CHECKOUT (DEBUG)
       # ==========================================================
-      - name: Checkout repository
+      - name: Checkout repository (debug)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       # ==========================================================
-      # 1️⃣ LOAD REPOSITORY VARIABLES
+      # 1️⃣ LOAD REPOSITORY VARIABLES (DEBUG)
       # ==========================================================
-      - name: Load Apigee variables
+      - name: Load Apigee variables (debug)
         shell: bash
         run: |
+          set -x
           echo "ORG=${{ vars.ORG }}" >> $GITHUB_ENV
           echo "APIGEE_ENVIRONMENT=${{ vars.APIGEE_ENVIRONMENT }}" >> $GITHUB_ENV
           echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
+          set +x
 
       # ==========================================================
-      # 2️⃣ CREATE SERVICE ACCOUNT FILE (FROM BASE64)
+      # 2️⃣ CREATE SERVICE ACCOUNT FILE (DEBUG)
       # ==========================================================
-      - name: Create service account file
+      - name: Create service account file (debug)
         shell: bash
         run: |
+          set +e
+          set -o pipefail
+
+          echo "Creating service account file: $SERVICE_ACCOUNT_FILE"
+
           echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
-          chmod 600 "$SERVICE_ACCOUNT_FILE"
+          EXIT_CODE=$?
+
+          ls -l "$SERVICE_ACCOUNT_FILE"
+          echo "Create file exit code: $EXIT_CODE"
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Failed to create service account file"
+            exit 1
+          fi
 
       # ==========================================================
-      # 3️⃣ DETECT CHANGED PROXIES
+      # 3️⃣ DETECT CHANGED PROXIES (DEBUG)
       # ==========================================================
-      - name: Detect changed proxies
+      - name: Detect changed proxies (debug)
         id: detect
         shell: bash
         run: |
-          BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          set +e
+          set -o pipefail
 
-          CHANGED=$(git diff --name-only $BASE HEAD \
+          BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          echo "BASE COMMIT: $BASE"
+
+          CHANGED=$(git diff --name-only $BASE HEAD 2>&1 \
             | grep '^api-proxies/' \
             | cut -d'/' -f2 \
             | sort -u)
+
+          EXIT_CODE=$?
+
+          echo "Changed proxies output:"
+          echo "$CHANGED"
+          echo "Detect exit code: $EXIT_CODE"
 
           if [ -z "$CHANGED" ]; then
             echo "❌ No proxy changes detected"
             exit 1
           fi
 
-          CHANGED_SPACES=$(echo "$CHANGED" | tr '\n' ' ')
-          echo "changed_proxies=$CHANGED_SPACES" >> $GITHUB_OUTPUT
+          echo "changed_proxies=$(echo "$CHANGED" | tr '\n' ' ')" >> $GITHUB_OUTPUT
 
       # ==========================================================
-      # 4️⃣ SETUP TOOLS
+      # 4️⃣ SETUP TOOLS (DEBUG)
       # ==========================================================
-      - name: Setup Node.js
+      - name: Setup Node.js (debug)
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Setup Java
+      - name: Setup Java (debug)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 11
 
-      - name: Install tools
-        run: |
-          npm install -g apigeelint newman newman-reporter-html
-
-      # ==========================================================
-      # 5️⃣ GENERATE ACCESS TOKEN
-      # ==========================================================
-      - name: Generate access token
+      - name: Install tools (debug)
         shell: bash
         run: |
+          set +e
+          npm install -g apigeelint newman newman-reporter-html 2>&1
+          echo "Install exit code: $?"
+
+      # ==========================================================
+      # 5️⃣ GENERATE ACCESS TOKEN (FULL DEBUG)
+      # ==========================================================
+      - name: Generate access token (full debug)
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+
           chmod +x scripts/revision.sh
 
           FIRST_PROXY=$(echo "${{ steps.detect.outputs.changed_proxies }}" | awk '{print $1}')
+
+          echo "========== DEBUG INPUTS =========="
+          echo "ORG=$ORG"
+          echo "FIRST_PROXY=$FIRST_PROXY"
+          echo "APIGEE_ENVIRONMENT=$APIGEE_ENVIRONMENT"
+          echo "SERVICE_ACCOUNT_FILE=$SERVICE_ACCOUNT_FILE"
+          echo "=================================="
 
           OUTPUT=$(scripts/revision.sh \
             "$ORG" \
             "$FIRST_PROXY" \
             "$APIGEE_ENVIRONMENT" \
-            "$SERVICE_ACCOUNT_FILE")
+            "$SERVICE_ACCOUNT_FILE" 2>&1)
+
+          EXIT_CODE=$?
+
+          echo ""
+          echo "========= revision.sh OUTPUT ========="
+          echo "$OUTPUT"
+          echo "====================================="
+          echo "Exit code: $EXIT_CODE"
 
           TOKEN=$(echo "$OUTPUT" | grep -oP '(?<=access_token=).*')
 
-          if [ -z "$TOKEN" ]; then
+          echo "Extracted token length: ${#TOKEN}"
+
+          if [ -z "$TOKEN" ] || [ $EXIT_CODE -ne 0 ]; then
             echo "❌ Token generation failed"
             exit 1
           fi
@@ -115,16 +159,20 @@ jobs:
           echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
 
       # ==========================================================
-      # 6️⃣ LINT + DEPLOY + INTEGRATION
+      # 6️⃣ LINT + DEPLOY + INTEGRATION (DEBUG)
       # ==========================================================
-      - name: Lint, Deploy & Integration Test
+      - name: Lint, Deploy & Integration Test (debug)
         shell: bash
         run: |
-          mkdir -p reports
+          set +e
+          set -o pipefail
 
+          mkdir -p reports
           IFS=' ' read -r -a PROXIES <<< "${{ steps.detect.outputs.changed_proxies }}"
 
           for proxy in "${PROXIES[@]}"; do
+            echo "========== PROCESSING $proxy =========="
+
             PROXY_DIR="api-proxies/$proxy/apiproxy"
             POM_FILE="api-proxies/$proxy/pom.xml"
             TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
@@ -132,27 +180,31 @@ jobs:
 
             mkdir -p "$REPORT_DIR"
 
-            apigeelint -s "$PROXY_DIR" -f html.js --profile apigeex > "$REPORT_DIR/lint.html"
+            apigeelint -s "$PROXY_DIR" -f html.js --profile apigeex \
+              > "$REPORT_DIR/lint.html" 2>&1
+            echo "Lint exit code: $?"
 
             mvn clean install \
               -f "$POM_FILE" \
               -P$APIGEE_ENVIRONMENT \
               -Dorg=$ORG \
-              -Dbearer=$ACCESS_TOKEN
+              -Dbearer=$ACCESS_TOKEN 2>&1
+            echo "Deploy exit code: $?"
 
             if [ -f "$TEST_FILE" ]; then
               newman run "$TEST_FILE" \
                 --reporters cli,html \
-                --reporter-html-export "$REPORT_DIR/integration.html"
+                --reporter-html-export "$REPORT_DIR/integration.html" 2>&1
+              echo "Integration exit code: $?"
             fi
           done
 
       # ==========================================================
-      # 7️⃣ UPLOAD REPORTS
+      # 7️⃣ UPLOAD REPORTS (DEBUG)
       # ==========================================================
       - name: Upload reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: proxy-reports
           path: reports
-        if: always()
