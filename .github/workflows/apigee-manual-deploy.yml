@@ -1,14 +1,11 @@
-name: Apigee - Manual Deploy Selected Proxies
+name: Apigee - Manual Deploy
 
 on:
   workflow_dispatch:
     inputs:
       proxies:
-        description: "Comma-separated proxy names (e.g. test-call,test-proxy1)"
+        description: "Type proxy names (comma-separated) OR ALL (see detected list in logs)"
         required: true
-
-env:
-  NODE_VERSION: 18
 
 jobs:
   deploy:
@@ -16,149 +13,118 @@ jobs:
 
     steps:
       # ==========================================================
-      # 0️⃣ CHECKOUT
+      # 1️⃣ CHECKOUT
       # ==========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       # ==========================================================
-      # 1️⃣ LOAD VARIABLES
+      # 2️⃣ SHOW DETECTED PROXIES FROM FILE
       # ==========================================================
-      - name: Load Apigee variables
+      - name: Show detected proxies
         shell: bash
         run: |
-          echo "ORG=${{ vars.ORG }}" >> $GITHUB_ENV
-          echo "APIGEE_ENVIRONMENT=${{ vars.APIGEE_ENVIRONMENT }}" >> $GITHUB_ENV
-          echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
+          FILE=".github/detected_proxies.txt"
 
-      # ==========================================================
-      # 2️⃣ CREATE SERVICE ACCOUNT FILE
-      # ==========================================================
-      - name: Create service account file
-        shell: bash
-        run: |
-          echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
-          chmod 600 "$SERVICE_ACCOUNT_FILE"
-
-      # ==========================================================
-      # 3️⃣ SETUP TOOLS
-      # ==========================================================
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 11
-
-      - name: Install tools
-        run: |
-          npm install -g apigeelint newman newman-reporter-html
-
-      # ==========================================================
-      # 4️⃣ GENERATE ACCESS TOKEN (AZURE SCRIPT)
-      # ==========================================================
-      - name: Generate access token
-        shell: bash
-        run: |
-          chmod +x scripts/revision.sh
-
-          FIRST_PROXY=$(echo "${{ github.event.inputs.proxies }}" | cut -d',' -f1)
-
-          OUTPUT=$(scripts/revision.sh \
-            "$ORG" \
-            "$FIRST_PROXY" \
-            "$APIGEE_ENVIRONMENT" \
-            "$SERVICE_ACCOUNT_FILE" 2>&1)
-
-          TOKEN=$(echo "$OUTPUT" \
-            | sed -n 's/.*variable=access_token;isOutput=true]\(.*\)/\1/p')
-
-          if [ -z "$TOKEN" ]; then
-            echo "❌ Failed to get access token"
+          if [ ! -f "$FILE" ]; then
+            echo "❌ detected_proxies.txt not found in repo"
             exit 1
           fi
 
-          echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
+          echo ""
+          echo "======================================"
+          echo "🔍 DETECTED APIGEE PROXIES"
+          echo "======================================"
+          cat "$FILE"
+          echo ""
+          echo "➡️ Copy proxy names into workflow input"
+          echo "➡️ Or type ALL"
 
       # ==========================================================
-      # 5️⃣ LINT + DEPLOY + INTEGRATION
+      # 3️⃣ RESOLVE USER SELECTION
       # ==========================================================
-      - name: Lint, Deploy & Integration
+      - name: Resolve selected proxies
         shell: bash
         run: |
-          mkdir -p reports
+          DETECTED=$(cat .github/detected_proxies.txt)
+          INPUT="${{ github.event.inputs.proxies }}"
 
-          HAS_FAILURE=0
-          SUCCESS=""
-          FAILED_LINT=""
-          FAILED_DEPLOY=""
-          FAILED_INTEGRATION=""
+          if [ -z "$INPUT" ]; then
+            echo "❌ No input provided"
+            exit 1
+          fi
 
-          IFS=',' read -r -a PROXIES <<< "${{ github.event.inputs.proxies }}"
+          if [ "$INPUT" = "ALL" ]; then
+            SELECTED="$DETECTED"
+          else
+            SELECTED=""
+            IFS=',' read -r -a USER <<< "$INPUT"
 
-          for proxy in "${PROXIES[@]}"; do
-            proxy=$(echo "$proxy" | xargs)
-            echo "🚦 Processing $proxy"
+            for p in "${USER[@]}"; do
+              p=$(echo "$p" | xargs)
+              if ! echo "$DETECTED" | grep -qw "$p"; then
+                echo "❌ Invalid proxy: $p"
+                exit 1
+              fi
+              SELECTED="$SELECTED $p"
+            done
+          fi
+
+          if [ -z "$SELECTED" ]; then
+            echo "❌ No valid proxies selected"
+            exit 1
+          fi
+
+          echo "SELECTED_PROXIES=$SELECTED" >> $GITHUB_ENV
+
+          echo ""
+          echo "✅ Selected proxies:"
+          for p in $SELECTED; do
+            echo "- $p"
+          done
+
+      # ==========================================================
+      # 4️⃣ LINT + DEPLOY + INTEGRATION
+      # ==========================================================
+      - name: Lint, Deploy & Integration Test
+        shell: bash
+        run: |
+          for proxy in $SELECTED_PROXIES; do
+            echo ""
+            echo "🚀 Processing proxy: $proxy"
 
             PROXY_DIR="api-proxies/$proxy/apiproxy"
             POM_FILE="api-proxies/$proxy/pom.xml"
             TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
 
-            apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex
-            if [ $? -ne 0 ]; then
-              FAILED_LINT="$FAILED_LINT $proxy"
-              HAS_FAILURE=1
-              continue
-            fi
+            # ---- LINT ----
+            apigeelint -s "$PROXY_DIR" --profile apigeex
 
+            # ---- DEPLOY ----
             mvn clean install \
               -f "$POM_FILE" \
               -P$APIGEE_ENVIRONMENT \
               -Dorg=$ORG \
               -Dbearer=$ACCESS_TOKEN
 
-            if [ $? -ne 0 ]; then
-              FAILED_DEPLOY="$FAILED_DEPLOY $proxy"
-              HAS_FAILURE=1
-              continue
-            fi
-
+            # ---- INTEGRATION ----
             if [ -f "$TEST_FILE" ]; then
               newman run "$TEST_FILE"
-              if [ $? -ne 0 ]; then
-                FAILED_INTEGRATION="$FAILED_INTEGRATION $proxy"
-                HAS_FAILURE=1
-                continue
-              fi
             fi
-
-            SUCCESS="$SUCCESS $proxy"
           done
 
-          echo "SUCCESS=$SUCCESS" >> $GITHUB_ENV
-          echo "FAILED_LINT=$FAILED_LINT" >> $GITHUB_ENV
-          echo "FAILED_DEPLOY=$FAILED_DEPLOY" >> $GITHUB_ENV
-          echo "FAILED_INTEGRATION=$FAILED_INTEGRATION" >> $GITHUB_ENV
-
-          if [ $HAS_FAILURE -eq 1 ]; then
-            exit 1
-          fi
-
       # ==========================================================
-      # 6️⃣ FINAL SUMMARY
+      # 5️⃣ FINAL SUMMARY
       # ==========================================================
       - name: Final Summary
         if: always()
         shell: bash
         run: |
           echo ""
-          echo "🚀 FINAL SUMMARY"
-          echo "=============================="
-          echo "✅ SUCCESS: ${SUCCESS:-None}"
-          echo "❌ LINT FAILED: ${FAILED_LINT:-None}"
-          echo "❌ DEPLOY FAILED: ${FAILED_DEPLOY:-None}"
-          echo "❌ INTEGRATION FAILED: ${FAILED_INTEGRATION:-None}"
+          echo "======================================"
+          echo "🚀 MANUAL DEPLOY SUMMARY"
+          echo "======================================"
+          echo ""
+          for p in $SELECTED_PROXIES; do
+            echo "✅ $p"
+          done
