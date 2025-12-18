@@ -1,0 +1,89 @@
+{
+    "info": {
+        "_postman_id": "your-collection-id",
+        "name": "Response Validation Tests",
+        "description": "A collection of tests to validate the response from https://demo-api.abacus-apigeee.com/test-call.",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+        {
+            "name": "Response Tests",
+            "event": [
+                {
+                    "listen": "test",
+                    "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                            "// Check if the response status code is 200",
+                            "pm.test(\"Response status code is 200\", function () {",
+                            "    pm.response.to.have.status(200);",
+                            "});",
+                            "",
+                            "// Check if the response body contains 'Hello, Guest!'",
+                            "pm.test(\"Body contains 'Hello, Guest!'\", function () {",
+                            "    pm.expect(pm.response.text()).to.include(\"Hello, Guest!\");",
+                            "});",
+                            "",
+                            "// Check if the request is successful (status code 200, 201, 202)",
+                            "pm.test(\"Request is successful\", function () {",
+                            "    pm.expect(pm.response).to.have.status(200);",
+                            "});",
+                            "",
+                            "// Check if the response is valid and has a body",
+                            "pm.test(\"Response is valid and has a body\", function () {",
+                            "    pm.response.to.be.ok;",
+                            "    pm.response.to.have.body;",
+                            "});",
+                            "",
+                            "// Check if the response body length is within the expected range",
+                            "pm.test(\"Response body length is within the expected range\", function () {",
+                            "    const responseData = pm.response.text();",
+                            "    pm.expect(responseData.length).to.be.within(10, 1000);",
+                            "});",
+                            "",
+                            "// Check if the response body matches exactly 'Hello, Guest!'",
+                            "pm.test(\"Response body is 'Hello, Guest!'\", function () {",
+                            "    pm.expect(pm.response.text()).to.eql(\"Hello, Guest!\");",
+                            "});",
+                            "",
+                            "// Check if the response contains 'Hello' and 'Guest'",
+                            "pm.test(\"Body contains 'Hello' and 'Guest'\", function () {",
+                            "    const responseBody = pm.response.text();",
+                            "    pm.expect(responseBody).to.include(\"Hello\");",
+                            "    pm.expect(responseBody).to.include(\"Guest\");",
+                            "});",
+                            "",
+                            "// Check if the response body starts with 'Hello'",
+                            "pm.test(\"Response body starts with 'Hello'\", function () {",
+                            "    const responseBody = pm.response.text();",
+                            "    pm.expect(responseBody).to.match(/^Hello/);",
+                            "});",
+                            "",
+                            "// Verify if the response body length is exactly 13 characters",
+                            "pm.test(\"Response body length is exactly 13 characters\", function () {",
+                            "    const responseBody = pm.response.text();",
+                            "    pm.expect(responseBody.length).to.eql(13);",
+                            "});"
+                        ]
+                    }
+                }
+            ],
+            "request": {
+                "method": "GET",
+                "url": {
+                    "raw": "https://demo-api.abacus-apigeee.com/test-call",
+                    "protocol": "https",
+                    "host": [
+                        "demo-api",
+                        "abacus-apigeee",
+                        "com"
+                    ],
+                    "path": [
+                        "test-call"
+                    ]
+                }
+            },
+            "response": []
+        }
+    ]
+}

@@ -1,0 +1,10 @@
+<ProxyEndpoint name="default">
+    <HTTPProxyConnection>
+        <BasePath>/test-proxy1</BasePath>
+        <VirtualHost>default</VirtualHost>
+    </HTTPProxyConnection>
+
+    <RouteRule name="route1">
+        <TargetEndpoint>test.proxy1</TargetEndpoint>
+    </RouteRule>
+</ProxyEndpoint>

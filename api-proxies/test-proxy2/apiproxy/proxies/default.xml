@@ -1,0 +1,13 @@
+<ProxyEndpoint name="default">
+    <HTTPProxyConnection>
+        <BasePath>/proxy2</BasePath>
+        <VirtualHost>default</VirtualHost>
+    </HTTPProxyConnection>
+
+    <RouteRule name="default">
+        <TargetEndpoint>default</TargetEndpoint>
+    </RouteRule>
+
+    <!-- Pipeline Trigger: Update #5 for test-proxy2 on 2025-12-09 -->
+</ProxyEndpoint>
+

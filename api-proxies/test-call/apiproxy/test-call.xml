@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<APIProxy revision="2" name="test-call">
+  <DisplayName/>
+  <Description>jenkins git: 21dac8e2 et02-jenkins01</Description>
+  <CreatedAt>1722937044422</CreatedAt>
+  <LastModifiedAt>1722937044422</LastModifiedAt>
+  <BasePaths>/test-call</BasePaths>
+  <ProxyEndpoints>
+    <ProxyEndpoint>default</ProxyEndpoint>
+  </ProxyEndpoints>
+  <TargetEndpoints>
+    <TargetEndpoint>default</TargetEndpoint>
+  </TargetEndpoints>
+</APIProxy>

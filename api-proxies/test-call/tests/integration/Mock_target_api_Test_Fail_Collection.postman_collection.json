@@ -1,0 +1,156 @@
+{
+	"info": {
+		"_postman_id": "abf5b086-5d2a-4fc2-a7b6-b3b345396b12",
+		"name": "Mock_target_api_Test_Fail_Collection",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "29474420"
+	},
+	"item": [
+		{
+			"name": "Get",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"// Fixed the response assertion check\r",
+							"pm.test(\"1. Successful GET request\", function () {\r",
+							"    pm.expect(pm.response.code).to.be.oneOf([200, 201, 202]);\r",
+							"}); \r",
+							"//Check Body\r",
+							"pm.test(\"2. To verify if Response is valid and has a body\", function () {\r",
+							"    pm.response.to.be.ok;\r",
+							"    pm.response.to.have.body; // Corrected from withBody to have.body\r",
+							"});\r",
+							"//Check match with body values\r",
+							"pm.test(\"3.To verify if response matches the values in body\", function () {\r",
+							"    pm.expect(pm.response.text()).to.include(\"firstName\");\r",
+							"    pm.expect(pm.response.text()).to.include(\"lastName\");\r",
+							"    pm.expect(pm.response.text()).to.include(\"city\");\r",
+							"    pm.expect(pm.response.text()).to.include(\"state\");\r",
+							"});\r",
+							"//check json values in body\r",
+							"pm.test(\"4.To verify the response if json values match in body \", function () {\r",
+							"    var jsonData = pm.response.json();\r",
+							"    pm.expect(jsonData.firstName).to.eql('Joh');\r",
+							"    pm.expect(jsonData.lastName).to.eql('Doe');\r",
+							"    pm.expect(jsonData.city).to.eql('San Jose');\r",
+							"    pm.expect(jsonData.state).to.eql('CA');\r",
+							"});\r",
+							"//Check Content header\r",
+							"pm.test(\"5.To verify the response if header is present  \", function () {\r",
+							"    pm.response.to.have.header(\"Content-Type\");\r",
+							"});\r",
+							"//Check content type in header\r",
+							"pm.test(\"6.To verify response if Content-Type header is application/json\", () => {\r",
+							"  pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json');\r",
+							"});\r",
+							"//Check response time\r",
+							"pm.test(\"7.To verify the Response if response time is less than 600ms\", function () {\r",
+							"    pm.expect(pm.response.responseTime).to.be.below(600);\r",
+							"});\r",
+							"//Check cookies is parent or not\r",
+							"pm.test(\"8.TO verify response if Cookie is not present\", () => {\r",
+							"  pm.expect(pm.cookies.has('')).to.be.false;\r",
+							"});\r",
+							"//Verify 404 Response Code\r",
+							"pm.test(\"9. To verify Response if 404 Resource not found\", function () {\r",
+							"    pm.sendRequest({\r",
+							"        url: 'https://mocktarget.apigee.net/invalid-url', // Intentionally invalid\r",
+							"        method: 'GET',\r",
+							"        header: {\r",
+							"            \"Authorization\": \"Bearer \" + pm.variables.get(\"accessToken\"),\r",
+							"            \"Content-Type\": \"application/json\"\r",
+							"        }\r",
+							"    }, function (error, response) {\r",
+							"        pm.expect(response.code).to.equal(404);\r",
+							"        pm.expect(response.status).to.equal(\"Not Found\");\r",
+							"    });\r",
+							"});\r",
+							"\r",
+							"// Check using response assertions\r",
+							"pm.test(\"10.To verify the response if response should be okay to process\", function () {\r",
+							"    pm.response.to.not.be.error;\r",
+							"    pm.response.to.have.jsonBody(\"firstName\");\r",
+							"    pm.response.to.not.have.jsonBody(\"error\");\r",
+							"});\r",
+							"\r",
+							"//Check the data type\r",
+							"pm.test(\"11.Check data types\", function () {  \r",
+							"    var jsonData = pm.response.json();\r",
+							"    pm.expect(jsonData.city).to.be.a(\"string\");\r",
+							"});\r",
+							"\r",
+							"// 13.set postman global variable in header\r",
+							"pm.request.headers.add({key: 'CustomHeader', value: 'CustomValue' });\r",
+							"pm.request.headers.add({key: 'Content-Type', value: 'application/json' });\r",
+							"//Set today's date with format\r",
+							"const dateNow = new Date();\r",
+							"postman.setGlobalVariable(\"todayDate\", dateNow.toLocaleDateString());\r",
+							""
+						],
+						"type": "text/javascript",
+						"packages": {},
+						"requests": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							""
+						],
+						"type": "text/javascript",
+						"packages": {},
+						"requests": {}
+					}
+				}
+			],
+			"protocolProfileBehavior": {
+				"disableBodyPruning": true
+			},
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "CustomHeader",
+						"value": "CustomValue",
+						"type": "text"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": ""
+				},
+				"url": {
+					"raw": "https://mocktarget.apigee.net/json",
+					"protocol": "https",
+					"host": [
+						"mocktarget",
+						"apigee",
+						"net"
+					],
+					"path": [
+						"json"
+					]
+				}
+			},
+			"response": []
+		}
+	],
+	"variable": [
+		{
+			"key": "userToken",
+			"value": ""
+		},
+		{
+			"key": "customerId",
+			"value": ""
+		}
+	]
+}

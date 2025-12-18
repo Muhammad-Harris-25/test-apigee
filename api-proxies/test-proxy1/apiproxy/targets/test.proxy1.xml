@@ -1,0 +1,5 @@
+<TargetEndpoint name="test.proxy1">
+    <HTTPTargetConnection>
+        <URL>https://postman-echo.com/get?proxy=proxy1</URL>
+    </HTTPTargetConnection>
+</TargetEndpoint>
