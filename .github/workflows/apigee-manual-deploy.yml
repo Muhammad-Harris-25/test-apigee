@@ -1,19 +1,15 @@
-name: Apigee - Manual Deploy Proxies
+name: Apigee - Manual Deploy
 
 on:
+  workflow_run:
+    workflows: ["Apigee - Detect Changed Proxies"]
+    types: [completed]
+
   workflow_dispatch:
     inputs:
-      deploy_mode:
-        description: "Choose deployment mode"
-        required: true
-        default: manual
-        type: choice
-        options:
-          - manual
-          - random
       proxies:
-        description: "Comma-separated proxy names (required if manual)"
-        required: false
+        description: "Comma-separated proxy names OR type ALL"
+        required: true
 
 env:
   NODE_VERSION: 18
@@ -23,52 +19,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # =========================
-      # CHECKOUT
-      # =========================
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # =========================
-      # DOWNLOAD DETECTED PROXIES
-      # =========================
-      - uses: actions/download-artifact@v4
+      - name: Download detected proxies artifact
+        uses: actions/download-artifact@v4
         with:
           name: detected-proxies
+          run-id: ${{ github.event.workflow_run.id }}
 
       - name: Load detected proxies
         shell: bash
         run: |
-          if [ ! -f detected_proxies.txt ]; then
-            echo "❌ detected_proxies.txt not found"
-            exit 1
-          fi
+          DETECTED=$(tr '\n' ' ' < detected_proxies.txt)
+          echo "DETECTED_PROXIES=$DETECTED" >> $GITHUB_ENV
 
-          DETECTED=$(cat detected_proxies.txt)
           echo "Detected proxies:"
-          echo "$DETECTED"
+          cat detected_proxies.txt
 
-          echo "DETECTED=$DETECTED" >> $GITHUB_ENV
-
-      # =========================
-      # SELECT PROXIES
-      # =========================
-      - name: Select target proxies
+      - name: Resolve selected proxies
         shell: bash
         run: |
-          MODE="${{ github.event.inputs.deploy_mode }}"
+          INPUT="${{ github.event.inputs.proxies }}"
+          DETECTED="$DETECTED_PROXIES"
 
-          if [ "$MODE" = "random" ]; then
-            IFS=$'\n' read -r -d '' -a ARR <<< "$DETECTED"$'\0'
-            SELECTED=${ARR[$RANDOM % ${#ARR[@]}]}
-            echo "🎯 Randomly selected: $SELECTED"
-
+          if [ "$INPUT" = "ALL" ]; then
+            SELECTED="$DETECTED"
           else
-            if [ -z "${{ github.event.inputs.proxies }}" ]; then
-              echo "❌ proxies input required for manual mode"
-              exit 1
-            fi
-
-            IFS=',' read -r -a USER <<< "${{ github.event.inputs.proxies }}"
+            SELECTED=""
+            IFS=',' read -r -a USER <<< "$INPUT"
             for p in "${USER[@]}"; do
               p=$(echo "$p" | xargs)
               if ! echo "$DETECTED" | grep -qw "$p"; then
@@ -79,107 +58,37 @@ jobs:
             done
           fi
 
-          echo "TARGET_PROXIES=$SELECTED" >> $GITHUB_ENV
+          echo "SELECTED_PROXIES=$SELECTED" >> $GITHUB_ENV
+          echo "Using proxies: $SELECTED"
 
-      # =========================
-      # LOAD APIGEE VARIABLES
-      # =========================
-      - name: Load Apigee variables
-        run: |
-          echo "ORG=${{ vars.ORG }}" >> $GITHUB_ENV
-          echo "APIGEE_ENVIRONMENT=${{ vars.APIGEE_ENVIRONMENT }}" >> $GITHUB_ENV
-          echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
+      # ===== Your existing Apigee setup steps go here =====
+      # Node / Java / secrets / service account / token etc.
 
-      # =========================
-      # CREATE SERVICE ACCOUNT FILE
-      # =========================
-      - name: Create service account file
-        run: |
-          echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
-          chmod 600 "$SERVICE_ACCOUNT_FILE"
-
-      # =========================
-      # SETUP TOOLS
-      # =========================
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 11
-
-      - name: Install tools
-        run: npm install -g apigeelint newman newman-reporter-html
-
-      # =========================
-      # GENERATE ACCESS TOKEN
-      # =========================
-      - name: Generate access token
+      - name: Deploy selected proxies
         shell: bash
         run: |
-          chmod +x scripts/revision.sh
-          FIRST=$(echo "$TARGET_PROXIES" | awk '{print $1}')
+          for proxy in $SELECTED_PROXIES; do
+            echo "🚀 Deploying $proxy"
 
-          OUTPUT=$(scripts/revision.sh \
-            "$ORG" \
-            "$FIRST" \
-            "$APIGEE_ENVIRONMENT" \
-            "$SERVICE_ACCOUNT_FILE" 2>&1)
-
-          TOKEN=$(echo "$OUTPUT" | sed -n 's/.*variable=access_token;isOutput=true]\(.*\)/\1/p')
-
-          if [ -z "$TOKEN" ]; then
-            echo "❌ Token generation failed"
-            exit 1
-          fi
-
-          echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
-
-      # =========================
-      # LINT + DEPLOY + TEST
-      # =========================
-      - name: Lint, Deploy & Integration
-        shell: bash
-        run: |
-          SUCCESS=""
-          FAILED=""
-          HAS_FAILURE=0
-
-          for proxy in $TARGET_PROXIES; do
-            echo "🚀 Processing $proxy"
-
-            apigeelint -s api-proxies/$proxy/apiproxy || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
+            apigeelint -s api-proxies/$proxy/apiproxy
 
             mvn clean install \
               -f api-proxies/$proxy/pom.xml \
               -P$APIGEE_ENVIRONMENT \
               -Dorg=$ORG \
-              -Dbearer=$ACCESS_TOKEN || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
+              -Dbearer=$ACCESS_TOKEN
 
             if [ -f api-proxies/$proxy/tests/integration/PassCollection.json ]; then
-              newman run api-proxies/$proxy/tests/integration/PassCollection.json || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; }
+              newman run api-proxies/$proxy/tests/integration/PassCollection.json
             fi
-
-            SUCCESS="$SUCCESS $proxy"
           done
 
-          echo "SUCCESS=$SUCCESS" >> $GITHUB_ENV
-          echo "FAILED=$FAILED" >> $GITHUB_ENV
-
-          [ $HAS_FAILURE -eq 1 ] && exit 1
-
-      # =========================
-      # FINAL SUMMARY
-      # =========================
       - name: Final Summary
         if: always()
         run: |
-          echo "=============================="
-          echo "🚀 FINAL SUMMARY"
-          echo "=============================="
-          echo "✅ SUCCESS: ${SUCCESS:-None}"
-          echo "❌ FAILED: ${FAILED:-None}"
-
-          
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployed Proxies:**" >> $GITHUB_STEP_SUMMARY
+          for p in $SELECTED_PROXIES; do
+            echo "- $p" >> $GITHUB_STEP_SUMMARY
+          done

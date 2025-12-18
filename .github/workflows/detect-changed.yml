@@ -2,35 +2,26 @@ name: Apigee - Detect Changed Proxies
 
 on:
   push:
-    branches: [ dev, uat, prod ]
-    paths-ignore:
-      - README.md
-      - shared-pom.xml
-      - apigeelint-pr.yml
-      - azure-pipelines.yml
-      - scripts/**
+    branches: [dev, uat, prod]
+    paths:
+      - api-proxies/**
 
 jobs:
   detect:
     runs-on: ubuntu-latest
 
     steps:
-      # =========================
-      # CHECKOUT
-      # =========================
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # =========================
-      # DETECT PROXIES
-      # =========================
       - name: Detect changed proxies
         shell: bash
         run: |
           BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
 
-          CHANGED=$(git diff --name-only $BASE HEAD \
+          CHANGED=$(git diff --name-only "$BASE" HEAD \
             | grep '^api-proxies/' \
             | cut -d'/' -f2 \
             | sort -u)
@@ -42,20 +33,19 @@ jobs:
 
           echo "$CHANGED" > detected_proxies.txt
 
-          echo "## 🔍 Detected Apigee Proxies" >> $GITHUB_STEP_SUMMARY
-          for p in $CHANGED; do
-            echo "- $p" >> $GITHUB_STEP_SUMMARY
-          done
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "➡️ Run **Apigee - Manual Deploy** workflow to deploy selected proxies" >> $GITHUB_STEP_SUMMARY
-
-      # =========================
-      # UPLOAD ARTIFACT
-      # =========================
-      - uses: actions/upload-artifact@v4
+      - name: Upload detected proxies
+        uses: actions/upload-artifact@v4
         with:
           name: detected-proxies
           path: detected_proxies.txt
 
-          
+      - name: Job Summary
+        run: |
+          echo "## 🔍 Detected Apigee Proxies" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          while read p; do
+            echo "- $p" >> $GITHUB_STEP_SUMMARY
+          done < detected_proxies.txt
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "➡️ Run **Apigee - Manual Deploy** workflow to deploy selected proxies" >> $GITHUB_STEP_SUMMARY
+       
