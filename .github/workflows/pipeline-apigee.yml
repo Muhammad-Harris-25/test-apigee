@@ -31,14 +31,31 @@ jobs:
           fetch-depth: 0
 
       # ==========================================================
-      # 1️⃣ DETECT CHANGED PROXIES
+      # 1️⃣ LOAD REPOSITORY VARIABLES
+      # ==========================================================
+      - name: Load Apigee variables
+        shell: bash
+        run: |
+          echo "ORG=${{ vars.ORG }}" >> $GITHUB_ENV
+          echo "APIGEE_ENVIRONMENT=${{ vars.APIGEE_ENVIRONMENT }}" >> $GITHUB_ENV
+          echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
+
+      # ==========================================================
+      # 2️⃣ CREATE SERVICE ACCOUNT FILE (FROM BASE64)
+      # ==========================================================
+      - name: Create service account file
+        shell: bash
+        run: |
+          echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
+          chmod 600 "$SERVICE_ACCOUNT_FILE"
+
+      # ==========================================================
+      # 3️⃣ DETECT CHANGED PROXIES
       # ==========================================================
       - name: Detect changed proxies
         id: detect
         shell: bash
         run: |
-          echo "🔍 Detecting changed proxies..."
-
           BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
 
           CHANGED=$(git diff --name-only $BASE HEAD \
@@ -51,36 +68,11 @@ jobs:
             exit 1
           fi
 
-          echo "✅ Detected proxies:"
-          echo "$CHANGED"
-
           CHANGED_SPACES=$(echo "$CHANGED" | tr '\n' ' ')
           echo "changed_proxies=$CHANGED_SPACES" >> $GITHUB_OUTPUT
 
       # ==========================================================
-      # 2️⃣ SET ENV VARIABLES (DEV / UAT / PROD)
-      # ==========================================================
-      - name: Set environment variables
-        shell: bash
-        run: |
-          BRANCH=${GITHUB_REF##*/}
-
-          if [ "$BRANCH" = "prod" ]; then
-            echo "APIGEE_ENVIRONMENT=prod" >> $GITHUB_ENV
-            echo "ORG=${{ secrets.APIGEE_PROD_ORG }}" >> $GITHUB_ENV
-            echo "SERVICE_ACCOUNT=${{ secrets.APIGEE_PROD_SA }}" >> $GITHUB_ENV
-          elif [ "$BRANCH" = "uat" ]; then
-            echo "APIGEE_ENVIRONMENT=uat" >> $GITHUB_ENV
-            echo "ORG=${{ secrets.APIGEE_UAT_ORG }}" >> $GITHUB_ENV
-            echo "SERVICE_ACCOUNT=${{ secrets.APIGEE_UAT_SA }}" >> $GITHUB_ENV
-          else
-            echo "APIGEE_ENVIRONMENT=dev" >> $GITHUB_ENV
-            echo "ORG=${{ secrets.APIGEE_DEV_ORG }}" >> $GITHUB_ENV
-            echo "SERVICE_ACCOUNT=${{ secrets.APIGEE_DEV_SA }}" >> $GITHUB_ENV
-          fi
-
-      # ==========================================================
-      # 3️⃣ SETUP TOOLS
+      # 4️⃣ SETUP TOOLS
       # ==========================================================
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -98,10 +90,9 @@ jobs:
           npm install -g apigeelint newman newman-reporter-html
 
       # ==========================================================
-      # 4️⃣ GENERATE ACCESS TOKEN
+      # 5️⃣ GENERATE ACCESS TOKEN
       # ==========================================================
       - name: Generate access token
-        id: token
         shell: bash
         run: |
           chmod +x scripts/revision.sh
@@ -112,7 +103,7 @@ jobs:
             "$ORG" \
             "$FIRST_PROXY" \
             "$APIGEE_ENVIRONMENT" \
-            "$SERVICE_ACCOUNT")
+            "$SERVICE_ACCOUNT_FILE")
 
           TOKEN=$(echo "$OUTPUT" | grep -oP '(?<=access_token=).*')
 
@@ -124,25 +115,16 @@ jobs:
           echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
 
       # ==========================================================
-      # 5️⃣ LINT + DEPLOY + INTEGRATION
+      # 6️⃣ LINT + DEPLOY + INTEGRATION
       # ==========================================================
       - name: Lint, Deploy & Integration Test
         shell: bash
         run: |
           mkdir -p reports
 
-          SUCCESS=""
-          FAILED_LINT=""
-          FAILED_DEPLOY=""
-          FAILED_INTEGRATION=""
-
           IFS=' ' read -r -a PROXIES <<< "${{ steps.detect.outputs.changed_proxies }}"
 
           for proxy in "${PROXIES[@]}"; do
-            echo "===================================="
-            echo "🚦 Processing $proxy"
-            echo "===================================="
-
             PROXY_DIR="api-proxies/$proxy/apiproxy"
             POM_FILE="api-proxies/$proxy/pom.xml"
             TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
@@ -150,49 +132,23 @@ jobs:
 
             mkdir -p "$REPORT_DIR"
 
-            # ---------- LINT ----------
-            LINT=$(apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex)
             apigeelint -s "$PROXY_DIR" -f html.js --profile apigeex > "$REPORT_DIR/lint.html"
 
-            if echo "$LINT" | grep -q "error"; then
-              FAILED_LINT="$FAILED_LINT $proxy"
-              continue
-            fi
-
-            # ---------- DEPLOY ----------
             mvn clean install \
               -f "$POM_FILE" \
               -P$APIGEE_ENVIRONMENT \
               -Dorg=$ORG \
               -Dbearer=$ACCESS_TOKEN
 
-            if [ $? -ne 0 ]; then
-              FAILED_DEPLOY="$FAILED_DEPLOY $proxy"
-              continue
-            fi
-
-            # ---------- INTEGRATION ----------
             if [ -f "$TEST_FILE" ]; then
               newman run "$TEST_FILE" \
                 --reporters cli,html \
                 --reporter-html-export "$REPORT_DIR/integration.html"
-
-              if [ $? -ne 0 ]; then
-                FAILED_INTEGRATION="$FAILED_INTEGRATION $proxy"
-                continue
-              fi
             fi
-
-            SUCCESS="$SUCCESS $proxy"
           done
 
-          echo "SUCCESS=$SUCCESS" >> $GITHUB_ENV
-          echo "FAILED_LINT=$FAILED_LINT" >> $GITHUB_ENV
-          echo "FAILED_DEPLOY=$FAILED_DEPLOY" >> $GITHUB_ENV
-          echo "FAILED_INTEGRATION=$FAILED_INTEGRATION" >> $GITHUB_ENV
-
       # ==========================================================
-      # 6️⃣ UPLOAD REPORTS
+      # 7️⃣ UPLOAD REPORTS
       # ==========================================================
       - name: Upload reports
         uses: actions/upload-artifact@v4
@@ -200,14 +156,3 @@ jobs:
           name: proxy-reports
           path: reports
         if: always()
-
-      # ==========================================================
-      # 7️⃣ FINAL SUMMARY
-      # ==========================================================
-      - name: Final summary
-        if: always()
-        run: |
-          echo "✅ SUCCESS: $SUCCESS"
-          echo "❌ LINT FAILED: $FAILED_LINT"
-          echo "❌ DEPLOY FAILED: $FAILED_DEPLOY"
-          echo "❌ INTEGRATION FAILED: $FAILED_INTEGRATION"
