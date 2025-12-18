@@ -38,7 +38,7 @@ jobs:
           echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
 
       # ==========================================================
-      # 2️⃣ CREATE SERVICE ACCOUNT FILE (FROM BASE64)
+      # 2️⃣ CREATE SERVICE ACCOUNT FILE (FROM BASE64 SECRET)
       # ==========================================================
       - name: Create service account file
         shell: bash
@@ -82,13 +82,14 @@ jobs:
           java-version: 11
 
       - name: Install tools
+        shell: bash
         run: |
           npm install -g apigeelint newman newman-reporter-html
 
       # ==========================================================
-      # 5️⃣ GENERATE ACCESS TOKEN (AZURE-STYLE PARSING)
+      # 5️⃣ GENERATE ACCESS TOKEN (AZURE STYLE – NO SCRIPT CHANGE)
       # ==========================================================
-      - name: Generate access token (Azure-compatible)
+      - name: Generate access token
         shell: bash
         run: |
           chmod +x scripts/revision.sh
@@ -112,7 +113,7 @@ jobs:
           echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
 
       # ==========================================================
-      # 6️⃣ LINT + DEPLOY + INTEGRATION
+      # 6️⃣ LINT + DEPLOY + INTEGRATION (FAIL WORKFLOW ON ANY ERROR)
       # ==========================================================
       - name: Lint, Deploy & Integration Test
         shell: bash
@@ -123,6 +124,7 @@ jobs:
           FAILED_LINT=""
           FAILED_DEPLOY=""
           FAILED_INTEGRATION=""
+          HAS_FAILURE=0
 
           IFS=' ' read -r -a PROXIES <<< "${{ steps.detect.outputs.changed_proxies }}"
 
@@ -139,11 +141,14 @@ jobs:
             mkdir -p "$REPORT_DIR"
 
             # ---------- LINT ----------
-            LINT_OUTPUT=$(apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex)
+            apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex
+            LINT_EXIT=$?
+
             apigeelint -s "$PROXY_DIR" -f html.js --profile apigeex > "$REPORT_DIR/lint.html"
 
-            if echo "$LINT_OUTPUT" | grep -qi "error"; then
+            if [ $LINT_EXIT -ne 0 ]; then
               FAILED_LINT="$FAILED_LINT $proxy"
+              HAS_FAILURE=1
               continue
             fi
 
@@ -156,6 +161,7 @@ jobs:
 
             if [ $? -ne 0 ]; then
               FAILED_DEPLOY="$FAILED_DEPLOY $proxy"
+              HAS_FAILURE=1
               continue
             fi
 
@@ -167,6 +173,7 @@ jobs:
 
               if [ $? -ne 0 ]; then
                 FAILED_INTEGRATION="$FAILED_INTEGRATION $proxy"
+                HAS_FAILURE=1
                 continue
               fi
             fi
@@ -178,6 +185,11 @@ jobs:
           echo "FAILED_LINT=$FAILED_LINT" >> $GITHUB_ENV
           echo "FAILED_DEPLOY=$FAILED_DEPLOY" >> $GITHUB_ENV
           echo "FAILED_INTEGRATION=$FAILED_INTEGRATION" >> $GITHUB_ENV
+
+          if [ $HAS_FAILURE -eq 1 ]; then
+            echo "❌ One or more stages failed"
+            exit 1
+          fi
 
       # ==========================================================
       # 7️⃣ UPLOAD REPORTS
