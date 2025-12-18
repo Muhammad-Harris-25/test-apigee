@@ -1,227 +1,227 @@
-name: Apigee CI/CD Pipeline
+# name: Apigee CI/CD Pipeline
 
-on:
-  push:
-    branches: [ dev, uat, prod ]
-    paths-ignore:
-      - README.md
-      - shared-pom.xml
-      - apigeelint-pr.yml
-      - azure-pipelines.yml
-      - scripts/**
-  workflow_dispatch:
+# on:
+#   push:
+#     branches: [ dev, uat, prod ]
+#     paths-ignore:
+#       - README.md
+#       - shared-pom.xml
+#       - apigeelint-pr.yml
+#       - azure-pipelines.yml
+#       - scripts/**
+#   workflow_dispatch:
 
-env:
-  NODE_VERSION: 18
+# env:
+#   NODE_VERSION: 18
 
-jobs:
-  apigee:
-    runs-on: ubuntu-latest
+# jobs:
+#   apigee:
+#     runs-on: ubuntu-latest
 
-    steps:
-      # ==========================================================
-      # 0️⃣ CHECKOUT
-      # ==========================================================
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+#     steps:
+#       # ==========================================================
+#       # 0️⃣ CHECKOUT
+#       # ==========================================================
+#       - name: Checkout repository
+#         uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
 
-      # ==========================================================
-      # 1️⃣ LOAD REPOSITORY VARIABLES
-      # ==========================================================
-      - name: Load Apigee variables
-        shell: bash
-        run: |
-          echo "ORG=${{ vars.ORG }}" >> $GITHUB_ENV
-          echo "APIGEE_ENVIRONMENT=${{ vars.APIGEE_ENVIRONMENT }}" >> $GITHUB_ENV
-          echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
+#       # ==========================================================
+#       # 1️⃣ LOAD REPOSITORY VARIABLES
+#       # ==========================================================
+#       - name: Load Apigee variables
+#         shell: bash
+#         run: |
+#           echo "ORG=${{ vars.ORG }}" >> $GITHUB_ENV
+#           echo "APIGEE_ENVIRONMENT=${{ vars.APIGEE_ENVIRONMENT }}" >> $GITHUB_ENV
+#           echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
 
-      # ==========================================================
-      # 2️⃣ CREATE SERVICE ACCOUNT FILE (FROM BASE64 SECRET)
-      # ==========================================================
-      - name: Create service account file
-        shell: bash
-        run: |
-          echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
-          chmod 600 "$SERVICE_ACCOUNT_FILE"
+#       # ==========================================================
+#       # 2️⃣ CREATE SERVICE ACCOUNT FILE (FROM BASE64 SECRET)
+#       # ==========================================================
+#       - name: Create service account file
+#         shell: bash
+#         run: |
+#           echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
+#           chmod 600 "$SERVICE_ACCOUNT_FILE"
 
-      # ==========================================================
-      # 3️⃣ DETECT CHANGED PROXIES
-      # ==========================================================
-      - name: Detect changed proxies
-        id: detect
-        shell: bash
-        run: |
-          BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
+#       # ==========================================================
+#       # 3️⃣ DETECT CHANGED PROXIES
+#       # ==========================================================
+#       - name: Detect changed proxies
+#         id: detect
+#         shell: bash
+#         run: |
+#           BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
 
-          CHANGED=$(git diff --name-only $BASE HEAD \
-            | grep '^api-proxies/' \
-            | cut -d'/' -f2 \
-            | sort -u)
+#           CHANGED=$(git diff --name-only $BASE HEAD \
+#             | grep '^api-proxies/' \
+#             | cut -d'/' -f2 \
+#             | sort -u)
 
-          if [ -z "$CHANGED" ]; then
-            echo "❌ No proxy changes detected"
-            exit 1
-          fi
+#           if [ -z "$CHANGED" ]; then
+#             echo "❌ No proxy changes detected"
+#             exit 1
+#           fi
 
-          echo "changed_proxies=$(echo "$CHANGED" | tr '\n' ' ')" >> $GITHUB_OUTPUT
+#           echo "changed_proxies=$(echo "$CHANGED" | tr '\n' ' ')" >> $GITHUB_OUTPUT
 
-      # ==========================================================
-      # 4️⃣ SETUP TOOLS
-      # ==========================================================
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
+#       # ==========================================================
+#       # 4️⃣ SETUP TOOLS
+#       # ==========================================================
+#       - name: Setup Node.js
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 11
+#       - name: Setup Java
+#         uses: actions/setup-java@v4
+#         with:
+#           distribution: temurin
+#           java-version: 11
 
-      - name: Install tools
-        shell: bash
-        run: |
-          npm install -g apigeelint newman newman-reporter-html
+#       - name: Install tools
+#         shell: bash
+#         run: |
+#           npm install -g apigeelint newman newman-reporter-html
 
-      # ==========================================================
-      # 5️⃣ GENERATE ACCESS TOKEN (AZURE STYLE – NO SCRIPT CHANGE)
-      # ==========================================================
-      - name: Generate access token
-        shell: bash
-        run: |
-          chmod +x scripts/revision.sh
+#       # ==========================================================
+#       # 5️⃣ GENERATE ACCESS TOKEN (AZURE STYLE – NO SCRIPT CHANGE)
+#       # ==========================================================
+#       - name: Generate access token
+#         shell: bash
+#         run: |
+#           chmod +x scripts/revision.sh
 
-          FIRST_PROXY=$(echo "${{ steps.detect.outputs.changed_proxies }}" | awk '{print $1}')
+#           FIRST_PROXY=$(echo "${{ steps.detect.outputs.changed_proxies }}" | awk '{print $1}')
 
-          OUTPUT=$(scripts/revision.sh \
-            "$ORG" \
-            "$FIRST_PROXY" \
-            "$APIGEE_ENVIRONMENT" \
-            "$SERVICE_ACCOUNT_FILE" 2>&1)
+#           OUTPUT=$(scripts/revision.sh \
+#             "$ORG" \
+#             "$FIRST_PROXY" \
+#             "$APIGEE_ENVIRONMENT" \
+#             "$SERVICE_ACCOUNT_FILE" 2>&1)
 
-          TOKEN=$(echo "$OUTPUT" \
-            | sed -n 's/.*variable=access_token;isOutput=true]\(.*\)/\1/p')
+#           TOKEN=$(echo "$OUTPUT" \
+#             | sed -n 's/.*variable=access_token;isOutput=true]\(.*\)/\1/p')
 
-          if [ -z "$TOKEN" ]; then
-            echo "❌ Failed to extract access token"
-            exit 1
-          fi
+#           if [ -z "$TOKEN" ]; then
+#             echo "❌ Failed to extract access token"
+#             exit 1
+#           fi
 
-          echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
+#           echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
 
-      # ==========================================================
-      # 6️⃣ LINT + DEPLOY + INTEGRATION (FAIL WORKFLOW ON ANY ERROR)
-      # ==========================================================
-      - name: Lint, Deploy & Integration Test
-        shell: bash
-        run: |
-          mkdir -p reports
+#       # ==========================================================
+#       # 6️⃣ LINT + DEPLOY + INTEGRATION (FAIL WORKFLOW ON ANY ERROR)
+#       # ==========================================================
+#       - name: Lint, Deploy & Integration Test
+#         shell: bash
+#         run: |
+#           mkdir -p reports
 
-          SUCCESS=""
-          FAILED_LINT=""
-          FAILED_DEPLOY=""
-          FAILED_INTEGRATION=""
-          HAS_FAILURE=0
+#           SUCCESS=""
+#           FAILED_LINT=""
+#           FAILED_DEPLOY=""
+#           FAILED_INTEGRATION=""
+#           HAS_FAILURE=0
 
-          IFS=' ' read -r -a PROXIES <<< "${{ steps.detect.outputs.changed_proxies }}"
+#           IFS=' ' read -r -a PROXIES <<< "${{ steps.detect.outputs.changed_proxies }}"
 
-          for proxy in "${PROXIES[@]}"; do
-            echo "===================================="
-            echo "🚦 Processing $proxy"
-            echo "===================================="
+#           for proxy in "${PROXIES[@]}"; do
+#             echo "===================================="
+#             echo "🚦 Processing $proxy"
+#             echo "===================================="
 
-            PROXY_DIR="api-proxies/$proxy/apiproxy"
-            POM_FILE="api-proxies/$proxy/pom.xml"
-            TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
-            REPORT_DIR="reports/$proxy"
+#             PROXY_DIR="api-proxies/$proxy/apiproxy"
+#             POM_FILE="api-proxies/$proxy/pom.xml"
+#             TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
+#             REPORT_DIR="reports/$proxy"
 
-            mkdir -p "$REPORT_DIR"
+#             mkdir -p "$REPORT_DIR"
 
-            # ---------- LINT ----------
-            apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex
-            LINT_EXIT=$?
+#             # ---------- LINT ----------
+#             apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex
+#             LINT_EXIT=$?
 
-            apigeelint -s "$PROXY_DIR" -f html.js --profile apigeex > "$REPORT_DIR/lint.html"
+#             apigeelint -s "$PROXY_DIR" -f html.js --profile apigeex > "$REPORT_DIR/lint.html"
 
-            if [ $LINT_EXIT -ne 0 ]; then
-              FAILED_LINT="$FAILED_LINT $proxy"
-              HAS_FAILURE=1
-              continue
-            fi
+#             if [ $LINT_EXIT -ne 0 ]; then
+#               FAILED_LINT="$FAILED_LINT $proxy"
+#               HAS_FAILURE=1
+#               continue
+#             fi
 
-            # ---------- DEPLOY ----------
-            mvn clean install \
-              -f "$POM_FILE" \
-              -P$APIGEE_ENVIRONMENT \
-              -Dorg=$ORG \
-              -Dbearer=$ACCESS_TOKEN
+#             # ---------- DEPLOY ----------
+#             mvn clean install \
+#               -f "$POM_FILE" \
+#               -P$APIGEE_ENVIRONMENT \
+#               -Dorg=$ORG \
+#               -Dbearer=$ACCESS_TOKEN
 
-            if [ $? -ne 0 ]; then
-              FAILED_DEPLOY="$FAILED_DEPLOY $proxy"
-              HAS_FAILURE=1
-              continue
-            fi
+#             if [ $? -ne 0 ]; then
+#               FAILED_DEPLOY="$FAILED_DEPLOY $proxy"
+#               HAS_FAILURE=1
+#               continue
+#             fi
 
-            # ---------- INTEGRATION ----------
-            if [ -f "$TEST_FILE" ]; then
-              newman run "$TEST_FILE" \
-                --reporters cli,html \
-                --reporter-html-export "$REPORT_DIR/integration.html"
+#             # ---------- INTEGRATION ----------
+#             if [ -f "$TEST_FILE" ]; then
+#               newman run "$TEST_FILE" \
+#                 --reporters cli,html \
+#                 --reporter-html-export "$REPORT_DIR/integration.html"
 
-              if [ $? -ne 0 ]; then
-                FAILED_INTEGRATION="$FAILED_INTEGRATION $proxy"
-                HAS_FAILURE=1
-                continue
-              fi
-            fi
+#               if [ $? -ne 0 ]; then
+#                 FAILED_INTEGRATION="$FAILED_INTEGRATION $proxy"
+#                 HAS_FAILURE=1
+#                 continue
+#               fi
+#             fi
 
-            SUCCESS="$SUCCESS $proxy"
-          done
+#             SUCCESS="$SUCCESS $proxy"
+#           done
 
-          echo "SUCCESS=$SUCCESS" >> $GITHUB_ENV
-          echo "FAILED_LINT=$FAILED_LINT" >> $GITHUB_ENV
-          echo "FAILED_DEPLOY=$FAILED_DEPLOY" >> $GITHUB_ENV
-          echo "FAILED_INTEGRATION=$FAILED_INTEGRATION" >> $GITHUB_ENV
+#           echo "SUCCESS=$SUCCESS" >> $GITHUB_ENV
+#           echo "FAILED_LINT=$FAILED_LINT" >> $GITHUB_ENV
+#           echo "FAILED_DEPLOY=$FAILED_DEPLOY" >> $GITHUB_ENV
+#           echo "FAILED_INTEGRATION=$FAILED_INTEGRATION" >> $GITHUB_ENV
 
-          if [ $HAS_FAILURE -eq 1 ]; then
-            echo "❌ One or more stages failed"
-            exit 1
-          fi
+#           if [ $HAS_FAILURE -eq 1 ]; then
+#             echo "❌ One or more stages failed"
+#             exit 1
+#           fi
 
-      # ==========================================================
-      # 7️⃣ UPLOAD REPORTS
-      # ==========================================================
-      - name: Upload reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: proxy-reports
-          path: reports
+#       # ==========================================================
+#       # 7️⃣ UPLOAD REPORTS
+#       # ==========================================================
+#       - name: Upload reports
+#         if: always()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: proxy-reports
+#           path: reports
 
-      # ==========================================================
-      # 8️⃣ FINAL SUMMARY
-      # ==========================================================
-      - name: Final Summary
-        if: always()
-        shell: bash
-        run: |
-          echo ""
-          echo "======================================"
-          echo "🚀 FINAL PIPELINE SUMMARY"
-          echo "======================================"
-          echo ""
-          echo "✅ SUCCESSFUL PROXIES:"
-          echo "${SUCCESS:-None}"
-          echo ""
-          echo "❌ LINT FAILED:"
-          echo "${FAILED_LINT:-None}"
-          echo ""
-          echo "❌ DEPLOY FAILED:"
-          echo "${FAILED_DEPLOY:-None}"
-          echo ""
-          echo "❌ INTEGRATION FAILED:"
-          echo "${FAILED_INTEGRATION:-None}"
-          echo ""
+#       # ==========================================================
+#       # 8️⃣ FINAL SUMMARY
+#       # ==========================================================
+#       - name: Final Summary
+#         if: always()
+#         shell: bash
+#         run: |
+#           echo ""
+#           echo "======================================"
+#           echo "🚀 FINAL PIPELINE SUMMARY"
+#           echo "======================================"
+#           echo ""
+#           echo "✅ SUCCESSFUL PROXIES:"
+#           echo "${SUCCESS:-None}"
+#           echo ""
+#           echo "❌ LINT FAILED:"
+#           echo "${FAILED_LINT:-None}"
+#           echo ""
+#           echo "❌ DEPLOY FAILED:"
+#           echo "${FAILED_DEPLOY:-None}"
+#           echo ""
+#           echo "❌ INTEGRATION FAILED:"
+#           echo "${FAILED_INTEGRATION:-None}"
+#           echo ""
