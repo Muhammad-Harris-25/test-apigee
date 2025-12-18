@@ -1,12 +1,3 @@
-# ==========================================================
-# 🚀 MAIN CI/CD PIPELINE (API Proxies Only)
-# ==========================================================
-# Triggers:
-# - Direct push to dev/uat/prod with api-proxies changes
-# - PR completed (merge) into dev/uat/prod with api-proxies changes
-# - Skips when only docs / scripts / pipeline files change
-# ==========================================================
-
 trigger:
   branches:
     include:
@@ -14,8 +5,6 @@ trigger:
       - uat
       - prod
   paths:
-    include:
-      - api-proxies/**
     exclude:
       - README.md
       - shared-pom.xml
@@ -23,15 +12,7 @@ trigger:
       - azure-pipelines.yml
       - scripts/**
 
-# ==========================================================
-# 🔑 GLOBAL VARIABLES
-# ==========================================================
 variables:
-  # Detect PR-triggered build (safety, though PR pipeline handles lint)
-  - name: IS_PR
-    value: $[eq(variables['Build.Reason'], 'PullRequest')]
-
-  # Environment-specific variable groups
   - ${{ if eq( variables['Build.SourceBranch'], 'refs/heads/prod' ) }}:
       - group: Apigee-Prod
   - ${{ if eq( variables['Build.SourceBranch'], 'refs/heads/uat' ) }}:
@@ -45,11 +26,10 @@ pool:
 steps:
 
 # ==========================================================
-# 0️⃣ CHECKOUT (FULL HISTORY FOR DIFF)
+# 0️⃣ CHECKOUT
 # ==========================================================
 - checkout: self
   fetchDepth: 0
-
 
 # ==========================================================
 # 1️⃣ DETECT CHANGED PROXIES
@@ -69,12 +49,15 @@ steps:
       exit 1
     fi
 
-    echo "✅ Detected proxies:"
+    echo ""
+    echo "✅ Detected Proxies:"
     echo "$CHANGED"
 
-    echo "##vso[task.setvariable variable=CHANGED_PROXIES]$(echo "$CHANGED" | tr '\n' ' ')"
-  displayName: "Detect Changed Proxies"
+    # convert newline → space for later steps
+    CHANGED_SPACES=$(echo "$CHANGED" | tr '\n' ' ')
 
+    echo "##vso[task.setvariable variable=CHANGED_PROXIES]$CHANGED_SPACES"
+  displayName: "Detect Changed Proxies"
 
 # ==========================================================
 # 2️⃣ DOWNLOAD SERVICE ACCOUNT
@@ -85,9 +68,8 @@ steps:
     secureFile: $(SERVICE_ACCOUNT_FILE)
   displayName: "Download Service Account"
 
-
 # ==========================================================
-# 3️⃣ GENERATE ACCESS TOKEN
+# 3️⃣ GENERATE ACCESS TOKEN (ONCE)
 # ==========================================================
 - bash: |
     chmod +x scripts/revision.sh
@@ -110,35 +92,26 @@ steps:
     echo "##vso[task.setvariable variable=ACCESS_TOKEN]$TOKEN"
   displayName: "Generate Access Token"
 
-
 # ==========================================================
-# 4️⃣ LINT + DEPLOY + INTEGRATION (PR-AWARE)
+# 4️⃣ LINT + DEPLOY + INTEGRATION (PER PROXY)
 # ==========================================================
 - bash: |
     npm install -g apigeelint newman newman-reporter-html
     mkdir -p reports
 
-    FAILED=false
-    SUMMARY=""
-
-    echo ""
-    echo "================ PIPELINE EXECUTION STARTED ================"
-    echo "PROXY | LINT | DEPLOY | INTEGRATION | RESULT"
-    echo "------------------------------------------------------------"
+    SUCCESS=""
+    FAILED_LINT=""
+    FAILED_DEPLOY=""
+    FAILED_INTEGRATION=""
 
     IFS=' ' read -r -a PROXIES <<< "$(CHANGED_PROXIES)"
 
     for proxy in "${PROXIES[@]}"; do
 
       echo ""
-      echo "================================================"
-      echo "🚦 Processing proxy: $proxy"
-      echo "================================================"
-
-      LINT_STATUS="⏭️"
-      DEPLOY_STATUS="⏭️"
-      INT_STATUS="⏭️"
-      RESULT="✅ SUCCESS"
+      echo "==============================================="
+      echo "🚦 PROCESSING: $proxy"
+      echo "==============================================="
 
       PROXY_DIR="$(Build.SourcesDirectory)/api-proxies/$proxy/apiproxy"
       POM_FILE="$(Build.SourcesDirectory)/api-proxies/$proxy/pom.xml"
@@ -147,95 +120,88 @@ steps:
 
       mkdir -p "$REPORT_DIR"
 
-      # -------------------------------------------------------
-      # 🔧 LINT (SKIP IF PR)
-      # -------------------------------------------------------
-      echo "🔧 STAGE: LINT"
+      # ---------- LINT ----------
+      echo "🔧 LINTING"
+      LINT=$(apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex)
+      echo "$LINT"
+      apigeelint -s "$PROXY_DIR" -f html.js --profile apigeex > "$REPORT_DIR/lint.html"
 
-      if [ "$(IS_PR)" = "true" ]; then
-        echo "⏭️ LINT SKIPPED (Already validated in Pull Request)"
-        LINT_STATUS="⏭️"
-      else
-        if apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex; then
-          echo "✅ LINT PASSED"
-          LINT_STATUS="✅"
-          apigeelint -s "$PROXY_DIR" -f html.js --profile apigeex > "$REPORT_DIR/lint.html"
-        else
-          echo "❌ LINT FAILED"
-          LINT_STATUS="❌"
-          RESULT="❌ FAIL"
-          FAILED=true
-        fi
+      if echo "$LINT" | grep -q "error"; then
+        echo "❌ LINT FAILED"
+        FAILED_LINT="$FAILED_LINT $proxy"
+        continue
       fi
 
-      # -------------------------------------------------------
-      # 🚀 DEPLOY
-      # -------------------------------------------------------
-      if [ "$LINT_STATUS" != "❌" ]; then
-        echo "🚀 STAGE: DEPLOY"
-        if mvn clean install \
-          -f "$POM_FILE" \
-          -P$(APIGEE_ENVIRONMENT) \
-          -Dorg=$(ORG) \
-          -Dbearer=$(ACCESS_TOKEN); then
-          echo "✅ DEPLOY PASSED"
-          DEPLOY_STATUS="✅"
-        else
-          echo "❌ DEPLOY FAILED"
-          DEPLOY_STATUS="❌"
-          RESULT="❌ FAIL"
-          FAILED=true
-        fi
+      # ---------- DEPLOY ----------
+      echo "🚀 DEPLOYING"
+      mvn clean install \
+        -f "$POM_FILE" \
+        -P$(APIGEE_ENVIRONMENT) \
+        -Dorg=$(ORG) \
+        -Dbearer=$(ACCESS_TOKEN)
+
+      if [ $? -ne 0 ]; then
+        echo "❌ DEPLOY FAILED"
+        FAILED_DEPLOY="$FAILED_DEPLOY $proxy"
+        continue
       fi
 
-      # -------------------------------------------------------
-      # 🧪 INTEGRATION
-      # -------------------------------------------------------
-      if [ "$DEPLOY_STATUS" = "✅" ]; then
-        if [ -f "$TEST_FILE" ]; then
-          echo "🧪 STAGE: INTEGRATION"
-          if newman run "$TEST_FILE" \
-            --reporters cli,html \
-            --reporter-html-export "$REPORT_DIR/integration.html"; then
-            echo "✅ INTEGRATION PASSED"
-            INT_STATUS="✅"
-          else
-            echo "❌ INTEGRATION FAILED"
-            INT_STATUS="❌"
-            RESULT="❌ FAIL"
-            FAILED=true
-          fi
-        else
-          echo "⚠️ Integration test not found — SKIPPED"
-        fi
+      # ---------- INTEGRATION ----------
+      if [ ! -f "$TEST_FILE" ]; then
+        echo "⚠️ PassCollection.json not found – skipping integration"
+        SUCCESS="$SUCCESS $proxy"
+        continue
       fi
 
-      SUMMARY_LINE="$proxy | $LINT_STATUS | $DEPLOY_STATUS | $INT_STATUS | $RESULT"
-      echo "📌 RESULT: $SUMMARY_LINE"
-      SUMMARY="$SUMMARY\n$SUMMARY_LINE"
+      echo "🧪 RUNNING INTEGRATION: PassCollection.json"
+      newman run "$TEST_FILE" \
+        --reporters cli,html \
+        --reporter-html-export "$REPORT_DIR/integration.html"
+
+      if [ $? -ne 0 ]; then
+        echo "❌ INTEGRATION FAILED"
+        FAILED_INTEGRATION="$FAILED_INTEGRATION $proxy"
+        continue
+      fi
+
+      echo "✅ ALL STEPS PASSED"
+      SUCCESS="$SUCCESS $proxy"
 
     done
 
-    echo ""
-    echo "================ FINAL PIPELINE SUMMARY ================"
-    echo "PROXY | LINT | DEPLOY | INTEGRATION | RESULT"
-    echo "--------------------------------------------------------"
-    echo -e "$SUMMARY"
-    echo "--------------------------------------------------------"
-
-    if [ "$FAILED" = true ]; then
-      echo "❌ PIPELINE FAILED — One or more proxies failed"
-      exit 1
-    fi
-
-    echo "✅ PIPELINE SUCCESS — All proxies passed"
-  displayName: "Lint + Deploy + Integration (PR-Aware Enterprise Mode)"
-
+    echo "##vso[task.setvariable variable=SUCCESS_LIST]$SUCCESS"
+    echo "##vso[task.setvariable variable=FAILED_LINT]$FAILED_LINT"
+    echo "##vso[task.setvariable variable=FAILED_DEPLOY]$FAILED_DEPLOY"
+    echo "##vso[task.setvariable variable=FAILED_INTEGRATION]$FAILED_INTEGRATION"
+  displayName: "Lint + Deploy + Integration (Enterprise Standard)"
 
 # ==========================================================
-# 5️⃣ PUBLISH REPORTS (ALWAYS)
+# 5️⃣ PUBLISH REPORTS
 # ==========================================================
 - publish: reports
   artifact: proxy-reports
-  displayName: "Publish Lint & Integration Reports"
+  displayName: "Publish Reports"
+  condition: always()
+
+# ==========================================================
+# 6️⃣ FINAL SUMMARY
+# ==========================================================
+- bash: |
+    echo ""
+    echo "============================================"
+    echo "🚀 FINAL PIPELINE SUMMARY"
+    echo "============================================"
+    echo ""
+    echo "✅ SUCCESS:"
+    echo "$(SUCCESS_LIST)"
+    echo ""
+    echo "❌ LINT FAILED:"
+    echo "$(FAILED_LINT)"
+    echo ""
+    echo "❌ DEPLOY FAILED:"
+    echo "$(FAILED_DEPLOY)"
+    echo ""
+    echo "❌ INTEGRATION FAILED:"
+    echo "$(FAILED_INTEGRATION)"
+  displayName: "Final Summary"
   condition: always()
