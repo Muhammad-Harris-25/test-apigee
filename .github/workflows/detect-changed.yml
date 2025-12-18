@@ -15,12 +15,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ==============================
+      # CHECKOUT
+      # ==============================
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # ==============================
+      # DETECT PROXIES
+      # ==============================
       - name: Detect changed proxies
+        id: detect
         shell: bash
         run: |
           BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
@@ -30,20 +37,37 @@ jobs:
             | cut -d'/' -f2 \
             | sort -u)
 
-          echo ""
+          echo "CHANGED=$CHANGED" >> $GITHUB_ENV
+
           echo "======================================"
           echo "🔍 DETECTED APIGEE PROXIES"
           echo "======================================"
 
           if [ -z "$CHANGED" ]; then
             echo "❌ No proxy changes detected"
-            exit 0
+          else
+            for p in $CHANGED; do
+              echo "👉 $p"
+            done
           fi
 
-          for p in $CHANGED; do
-            echo "👉 $p"
-          done
+      # ==============================
+      # PUBLISH SUMMARY (VISIBLE UI)
+      # ==============================
+      - name: Publish detected proxies (Summary)
+        if: always()
+        shell: bash
+        run: |
+          echo "## 🔍 Detected Apigee Proxies" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo ""
-          echo "➡️ Copy proxy names and run:"
-          echo "➡️ Apigee - Manual Deploy workflow"
+          if [ -z "$CHANGED" ]; then
+            echo "- None" >> $GITHUB_STEP_SUMMARY
+          else
+            for p in $CHANGED; do
+              echo "- $p" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**➡️ Copy these proxy names and paste them into the Manual Deploy workflow input**" >> $GITHUB_STEP_SUMMARY

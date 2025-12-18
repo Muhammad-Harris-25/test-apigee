@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       proxies:
-        description: "Comma-separated proxy names (e.g. test-call,test-proxy1)"
+        description: "Copy proxy names from the Detect workflow summary (comma-separated)"
         required: true
 
 env:
@@ -15,17 +15,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ==========================================================
-      # 0️⃣ CHECKOUT
-      # ==========================================================
+      # ==============================
+      # CHECKOUT
+      # ==============================
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ==========================================================
-      # 1️⃣ LOAD VARIABLES
-      # ==========================================================
+      # ==============================
+      # LOAD VARIABLES
+      # ==============================
       - name: Load Apigee variables
         shell: bash
         run: |
@@ -33,18 +33,44 @@ jobs:
           echo "APIGEE_ENVIRONMENT=${{ vars.APIGEE_ENVIRONMENT }}" >> $GITHUB_ENV
           echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
 
-      # ==========================================================
-      # 2️⃣ CREATE SERVICE ACCOUNT FILE
-      # ==========================================================
+      # ==============================
+      # CREATE SERVICE ACCOUNT FILE
+      # ==============================
       - name: Create service account file
         shell: bash
         run: |
           echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
           chmod 600 "$SERVICE_ACCOUNT_FILE"
 
-      # ==========================================================
-      # 3️⃣ SETUP TOOLS
-      # ==========================================================
+      # ==============================
+      # VALIDATE SELECTED PROXIES
+      # ==============================
+      - name: Validate selected proxies
+        shell: bash
+        run: |
+          DETECTED=$(ls api-proxies | sort)
+          IFS=',' read -r -a SELECTED <<< "${{ github.event.inputs.proxies }}"
+
+          echo "Detected proxies:"
+          echo "$DETECTED"
+          echo ""
+          echo "Selected proxies:"
+          printf '%s\n' "${SELECTED[@]}"
+
+          for p in "${SELECTED[@]}"; do
+            p=$(echo "$p" | xargs)
+            if ! echo "$DETECTED" | grep -qw "$p"; then
+              echo "❌ Invalid proxy selected: $p"
+              exit 1
+            fi
+          done
+
+          echo "VALID_PROXIES=$(echo "${SELECTED[*]}")" >> $GITHUB_ENV
+          echo "✅ Proxy selection validated"
+
+      # ==============================
+      # SETUP TOOLS
+      # ==============================
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -58,15 +84,15 @@ jobs:
         run: |
           npm install -g apigeelint newman newman-reporter-html
 
-      # ==========================================================
-      # 4️⃣ GENERATE ACCESS TOKEN (AZURE SCRIPT)
-      # ==========================================================
+      # ==============================
+      # GENERATE ACCESS TOKEN
+      # ==============================
       - name: Generate access token
         shell: bash
         run: |
           chmod +x scripts/revision.sh
 
-          FIRST_PROXY=$(echo "${{ github.event.inputs.proxies }}" | cut -d',' -f1)
+          FIRST_PROXY=$(echo "$VALID_PROXIES" | awk '{print $1}')
 
           OUTPUT=$(scripts/revision.sh \
             "$ORG" \
@@ -84,25 +110,26 @@ jobs:
 
           echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
 
-      # ==========================================================
-      # 5️⃣ LINT + DEPLOY + INTEGRATION
-      # ==========================================================
+      # ==============================
+      # LINT + DEPLOY + INTEGRATION
+      # ==============================
       - name: Lint, Deploy & Integration
         shell: bash
         run: |
           mkdir -p reports
 
-          HAS_FAILURE=0
           SUCCESS=""
           FAILED_LINT=""
           FAILED_DEPLOY=""
           FAILED_INTEGRATION=""
+          HAS_FAILURE=0
 
-          IFS=',' read -r -a PROXIES <<< "${{ github.event.inputs.proxies }}"
+          IFS=' ' read -r -a PROXIES <<< "$VALID_PROXIES"
 
           for proxy in "${PROXIES[@]}"; do
-            proxy=$(echo "$proxy" | xargs)
+            echo "===================================="
             echo "🚦 Processing $proxy"
+            echo "===================================="
 
             PROXY_DIR="api-proxies/$proxy/apiproxy"
             POM_FILE="api-proxies/$proxy/pom.xml"
@@ -148,17 +175,26 @@ jobs:
             exit 1
           fi
 
-      # ==========================================================
-      # 6️⃣ FINAL SUMMARY
-      # ==========================================================
+      # ==============================
+      # FINAL SUMMARY
+      # ==============================
       - name: Final Summary
         if: always()
         shell: bash
         run: |
           echo ""
-          echo "🚀 FINAL SUMMARY"
-          echo "=============================="
-          echo "✅ SUCCESS: ${SUCCESS:-None}"
-          echo "❌ LINT FAILED: ${FAILED_LINT:-None}"
-          echo "❌ DEPLOY FAILED: ${FAILED_DEPLOY:-None}"
-          echo "❌ INTEGRATION FAILED: ${FAILED_INTEGRATION:-None}"
+          echo "======================================"
+          echo "🚀 FINAL PIPELINE SUMMARY"
+          echo "======================================"
+          echo ""
+          echo "✅ SUCCESS:"
+          echo "${SUCCESS:-None}"
+          echo ""
+          echo "❌ LINT FAILED:"
+          echo "${FAILED_LINT:-None}"
+          echo ""
+          echo "❌ DEPLOY FAILED:"
+          echo "${FAILED_DEPLOY:-None}"
+          echo ""
+          echo "❌ INTEGRATION FAILED:"
+          echo "${FAILED_INTEGRATION:-None}"
