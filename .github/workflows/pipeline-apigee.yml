@@ -91,9 +91,6 @@ jobs:
       - name: Generate access token (Azure-compatible)
         shell: bash
         run: |
-          set +e
-          set -o pipefail
-
           chmod +x scripts/revision.sh
 
           FIRST_PROXY=$(echo "${{ steps.detect.outputs.changed_proxies }}" | awk '{print $1}')
@@ -104,15 +101,8 @@ jobs:
             "$APIGEE_ENVIRONMENT" \
             "$SERVICE_ACCOUNT_FILE" 2>&1)
 
-          echo "===== revision.sh output ====="
-          echo "$OUTPUT"
-          echo "=============================="
-
-          # 🔑 Extract token from Azure DevOps logging command
           TOKEN=$(echo "$OUTPUT" \
             | sed -n 's/.*variable=access_token;isOutput=true]\(.*\)/\1/p')
-
-          echo "Extracted token length: ${#TOKEN}"
 
           if [ -z "$TOKEN" ]; then
             echo "❌ Failed to extract access token"
@@ -128,10 +118,18 @@ jobs:
         shell: bash
         run: |
           mkdir -p reports
+
+          SUCCESS=""
+          FAILED_LINT=""
+          FAILED_DEPLOY=""
+          FAILED_INTEGRATION=""
+
           IFS=' ' read -r -a PROXIES <<< "${{ steps.detect.outputs.changed_proxies }}"
 
           for proxy in "${PROXIES[@]}"; do
+            echo "===================================="
             echo "🚦 Processing $proxy"
+            echo "===================================="
 
             PROXY_DIR="api-proxies/$proxy/apiproxy"
             POM_FILE="api-proxies/$proxy/pom.xml"
@@ -140,21 +138,46 @@ jobs:
 
             mkdir -p "$REPORT_DIR"
 
-            apigeelint -s "$PROXY_DIR" -f html.js --profile apigeex \
-              > "$REPORT_DIR/lint.html"
+            # ---------- LINT ----------
+            LINT_OUTPUT=$(apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex)
+            apigeelint -s "$PROXY_DIR" -f html.js --profile apigeex > "$REPORT_DIR/lint.html"
 
+            if echo "$LINT_OUTPUT" | grep -qi "error"; then
+              FAILED_LINT="$FAILED_LINT $proxy"
+              continue
+            fi
+
+            # ---------- DEPLOY ----------
             mvn clean install \
               -f "$POM_FILE" \
               -P$APIGEE_ENVIRONMENT \
               -Dorg=$ORG \
               -Dbearer=$ACCESS_TOKEN
 
+            if [ $? -ne 0 ]; then
+              FAILED_DEPLOY="$FAILED_DEPLOY $proxy"
+              continue
+            fi
+
+            # ---------- INTEGRATION ----------
             if [ -f "$TEST_FILE" ]; then
               newman run "$TEST_FILE" \
                 --reporters cli,html \
                 --reporter-html-export "$REPORT_DIR/integration.html"
+
+              if [ $? -ne 0 ]; then
+                FAILED_INTEGRATION="$FAILED_INTEGRATION $proxy"
+                continue
+              fi
             fi
+
+            SUCCESS="$SUCCESS $proxy"
           done
+
+          echo "SUCCESS=$SUCCESS" >> $GITHUB_ENV
+          echo "FAILED_LINT=$FAILED_LINT" >> $GITHUB_ENV
+          echo "FAILED_DEPLOY=$FAILED_DEPLOY" >> $GITHUB_ENV
+          echo "FAILED_INTEGRATION=$FAILED_INTEGRATION" >> $GITHUB_ENV
 
       # ==========================================================
       # 7️⃣ UPLOAD REPORTS
@@ -165,3 +188,28 @@ jobs:
         with:
           name: proxy-reports
           path: reports
+
+      # ==========================================================
+      # 8️⃣ FINAL SUMMARY
+      # ==========================================================
+      - name: Final Summary
+        if: always()
+        shell: bash
+        run: |
+          echo ""
+          echo "======================================"
+          echo "🚀 FINAL PIPELINE SUMMARY"
+          echo "======================================"
+          echo ""
+          echo "✅ SUCCESSFUL PROXIES:"
+          echo "${SUCCESS:-None}"
+          echo ""
+          echo "❌ LINT FAILED:"
+          echo "${FAILED_LINT:-None}"
+          echo ""
+          echo "❌ DEPLOY FAILED:"
+          echo "${FAILED_DEPLOY:-None}"
+          echo ""
+          echo "❌ INTEGRATION FAILED:"
+          echo "${FAILED_INTEGRATION:-None}"
+          echo ""
