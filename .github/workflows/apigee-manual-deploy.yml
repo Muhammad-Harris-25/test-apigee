@@ -1,53 +1,65 @@
 name: Apigee - Manual Deploy
 
 on:
-  workflow_run:
-    workflows: ["Apigee - Detect Changed Proxies"]
-    types: [completed]
-
   workflow_dispatch:
     inputs:
       proxies:
-        description: "Comma-separated proxy names OR type ALL"
+        description: "Type proxy names (comma-separated) OR ALL (see detected list in logs)"
         required: true
-
-env:
-  NODE_VERSION: 18
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      # ==========================================================
+      # 1️⃣ CHECKOUT
+      # ==========================================================
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download detected proxies artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: detected-proxies
-          run-id: ${{ github.event.workflow_run.id }}
-
-      - name: Load detected proxies
+      # ==========================================================
+      # 2️⃣ SHOW DETECTED PROXIES FROM FILE
+      # ==========================================================
+      - name: Show detected proxies
         shell: bash
         run: |
-          DETECTED=$(tr '\n' ' ' < detected_proxies.txt)
-          echo "DETECTED_PROXIES=$DETECTED" >> $GITHUB_ENV
+          FILE=".github/detected_proxies.txt"
 
-          echo "Detected proxies:"
-          cat detected_proxies.txt
+          if [ ! -f "$FILE" ]; then
+            echo "❌ detected_proxies.txt not found in repo"
+            exit 1
+          fi
 
+          echo ""
+          echo "======================================"
+          echo "🔍 DETECTED APIGEE PROXIES"
+          echo "======================================"
+          cat "$FILE"
+          echo ""
+          echo "➡️ Copy proxy names into workflow input"
+          echo "➡️ Or type ALL"
+
+      # ==========================================================
+      # 3️⃣ RESOLVE USER SELECTION
+      # ==========================================================
       - name: Resolve selected proxies
         shell: bash
         run: |
+          DETECTED=$(cat .github/detected_proxies.txt)
           INPUT="${{ github.event.inputs.proxies }}"
-          DETECTED="$DETECTED_PROXIES"
+
+          if [ -z "$INPUT" ]; then
+            echo "❌ No input provided"
+            exit 1
+          fi
 
           if [ "$INPUT" = "ALL" ]; then
             SELECTED="$DETECTED"
           else
             SELECTED=""
             IFS=',' read -r -a USER <<< "$INPUT"
+
             for p in "${USER[@]}"; do
               p=$(echo "$p" | xargs)
               if ! echo "$DETECTED" | grep -qw "$p"; then
@@ -58,37 +70,61 @@ jobs:
             done
           fi
 
+          if [ -z "$SELECTED" ]; then
+            echo "❌ No valid proxies selected"
+            exit 1
+          fi
+
           echo "SELECTED_PROXIES=$SELECTED" >> $GITHUB_ENV
-          echo "Using proxies: $SELECTED"
 
-      # ===== Your existing Apigee setup steps go here =====
-      # Node / Java / secrets / service account / token etc.
+          echo ""
+          echo "✅ Selected proxies:"
+          for p in $SELECTED; do
+            echo "- $p"
+          done
 
-      - name: Deploy selected proxies
+      # ==========================================================
+      # 4️⃣ LINT + DEPLOY + INTEGRATION
+      # ==========================================================
+      - name: Lint, Deploy & Integration Test
         shell: bash
         run: |
           for proxy in $SELECTED_PROXIES; do
-            echo "🚀 Deploying $proxy"
+            echo ""
+            echo "🚀 Processing proxy: $proxy"
 
-            apigeelint -s api-proxies/$proxy/apiproxy
+            PROXY_DIR="api-proxies/$proxy/apiproxy"
+            POM_FILE="api-proxies/$proxy/pom.xml"
+            TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
 
+            # ---- LINT ----
+            apigeelint -s "$PROXY_DIR" --profile apigeex
+
+            # ---- DEPLOY ----
             mvn clean install \
-              -f api-proxies/$proxy/pom.xml \
+              -f "$POM_FILE" \
               -P$APIGEE_ENVIRONMENT \
               -Dorg=$ORG \
               -Dbearer=$ACCESS_TOKEN
 
-            if [ -f api-proxies/$proxy/tests/integration/PassCollection.json ]; then
-              newman run api-proxies/$proxy/tests/integration/PassCollection.json
+            # ---- INTEGRATION ----
+            if [ -f "$TEST_FILE" ]; then
+              newman run "$TEST_FILE"
             fi
           done
 
+      # ==========================================================
+      # 5️⃣ FINAL SUMMARY
+      # ==========================================================
       - name: Final Summary
         if: always()
+        shell: bash
         run: |
-          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Deployed Proxies:**" >> $GITHUB_STEP_SUMMARY
+          echo ""
+          echo "======================================"
+          echo "🚀 MANUAL DEPLOY SUMMARY"
+          echo "======================================"
+          echo ""
           for p in $SELECTED_PROXIES; do
-            echo "- $p" >> $GITHUB_STEP_SUMMARY
+            echo "✅ $p"
           done

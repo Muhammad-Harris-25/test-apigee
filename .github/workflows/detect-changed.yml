@@ -1,51 +1,55 @@
-name: Apigee - Detect Changed Proxies
+name: Apigee - Manual Deploy
 
 on:
-  push:
-    branches: [dev, uat, prod]
-    paths:
-      - api-proxies/**
+  workflow_dispatch:
+    inputs:
+      proxies:
+        description: "Comma-separated proxy names OR ALL (see detected_proxies.txt)"
+        required: true
 
 jobs:
-  detect:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - name: Detect changed proxies
+      - name: Show detected proxies
         shell: bash
         run: |
-          BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
-
-          CHANGED=$(git diff --name-only "$BASE" HEAD \
-            | grep '^api-proxies/' \
-            | cut -d'/' -f2 \
-            | sort -u)
-
-          if [ -z "$CHANGED" ]; then
-            echo "No proxies detected"
-            exit 0
+          if [ ! -f .github/detected_proxies.txt ]; then
+            echo "❌ detected_proxies.txt not found"
+            exit 1
           fi
 
-          echo "$CHANGED" > detected_proxies.txt
+          echo "Detected proxies from last run:"
+          cat .github/detected_proxies.txt
 
-      - name: Upload detected proxies
-        uses: actions/upload-artifact@v4
-        with:
-          name: detected-proxies
-          path: detected_proxies.txt
+          echo ""
+          echo "➡️ Copy names into workflow input"
 
-      - name: Job Summary
+      - name: Resolve selected proxies
+        shell: bash
         run: |
-          echo "## 🔍 Detected Apigee Proxies" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          while read p; do
-            echo "- $p" >> $GITHUB_STEP_SUMMARY
-          done < detected_proxies.txt
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "➡️ Run **Apigee - Manual Deploy** workflow to deploy selected proxies" >> $GITHUB_STEP_SUMMARY
-       
+          DETECTED=$(cat .github/detected_proxies.txt)
+          INPUT="${{ github.event.inputs.proxies }}"
+
+          if [ "$INPUT" = "ALL" ]; then
+            SELECTED="$DETECTED"
+          else
+            SELECTED=""
+            IFS=',' read -r -a USER <<< "$INPUT"
+            for p in "${USER[@]}"; do
+              p=$(echo "$p" | xargs)
+              if ! echo "$DETECTED" | grep -qw "$p"; then
+                echo "❌ Invalid proxy: $p"
+                exit 1
+              fi
+              SELECTED="$SELECTED $p"
+            done
+          fi
+
+          echo "SELECTED_PROXIES=$SELECTED" >> $GITHUB_ENV
+          echo "Using proxies: $SELECTED"
+
+      # 🔽 continue with lint / deploy / test
