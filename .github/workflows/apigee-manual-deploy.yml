@@ -4,8 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       proxies:
-        description: "Type proxy names (comma-separated) OR ALL (see detected list in logs)"
+        description: "Comma-separated proxy names OR ALL (see detected list in logs)"
         required: true
+
+env:
+  NODE_VERSION: 18
 
 jobs:
   deploy:
@@ -13,13 +16,15 @@ jobs:
 
     steps:
       # ==========================================================
-      # 1️⃣ CHECKOUT REPOSITORY
+      # 0️⃣ CHECKOUT
       # ==========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # ==========================================================
-      # 2️⃣ VERIFY & SHOW DETECTED PROXIES FILE
+      # 1️⃣ SHOW DETECTED PROXIES
       # ==========================================================
       - name: Show detected proxies
         shell: bash
@@ -27,8 +32,8 @@ jobs:
           FILE=".github/detected_proxies.txt"
 
           if [ ! -f "$FILE" ]; then
-            echo "❌ detected_proxies.txt not found in repo"
-            echo "➡️ Run 'Apigee - Detect Changed Proxies' workflow first"
+            echo "❌ detected_proxies.txt not found"
+            echo "➡️ Run auto-detect workflow first"
             exit 1
           fi
 
@@ -37,17 +42,14 @@ jobs:
             exit 1
           fi
 
-          echo ""
           echo "======================================"
           echo "🔍 DETECTED APIGEE PROXIES"
           echo "======================================"
           cat "$FILE"
           echo ""
-          echo "➡️ Copy proxy names into workflow input"
-          echo "➡️ Or type ALL"
 
       # ==========================================================
-      # 3️⃣ RESOLVE USER SELECTION
+      # 2️⃣ RESOLVE USER SELECTION
       # ==========================================================
       - name: Resolve selected proxies
         shell: bash
@@ -55,23 +57,15 @@ jobs:
           DETECTED=$(cat .github/detected_proxies.txt)
           INPUT="${{ github.event.inputs.proxies }}"
 
-          if [ -z "$INPUT" ]; then
-            echo "❌ No proxies input provided"
-            exit 1
-          fi
-
           if [ "$INPUT" = "ALL" ]; then
             SELECTED="$DETECTED"
           else
             SELECTED=""
             IFS=',' read -r -a USER <<< "$INPUT"
-
             for p in "${USER[@]}"; do
               p=$(echo "$p" | xargs)
               if ! echo "$DETECTED" | grep -qw "$p"; then
                 echo "❌ Invalid proxy: $p"
-                echo "➡️ Must be one of:"
-                echo "$DETECTED"
                 exit 1
               fi
               SELECTED="$SELECTED $p"
@@ -85,54 +79,149 @@ jobs:
 
           echo "SELECTED_PROXIES=$SELECTED" >> $GITHUB_ENV
 
-          echo ""
-          echo "✅ Selected proxies:"
+          echo "Selected proxies:"
           for p in $SELECTED; do
-            echo "- $p"
+            echo " - $p"
           done
 
       # ==========================================================
-      # 4️⃣ LINT + DEPLOY + INTEGRATION
+      # 3️⃣ LOAD APIGEE VARIABLES (REPO VARIABLES)
+      # ==========================================================
+      - name: Load Apigee variables
+        shell: bash
+        run: |
+          if [ -z "${{ vars.ORG }}" ] || [ -z "${{ vars.APIGEE_ENVIRONMENT }}" ] || [ -z "${{ vars.SERVICE_ACCOUNT_FILE }}" ]; then
+            echo "❌ Required repo variables missing"
+            exit 1
+          fi
+
+          echo "ORG=${{ vars.ORG }}" >> $GITHUB_ENV
+          echo "APIGEE_ENVIRONMENT=${{ vars.APIGEE_ENVIRONMENT }}" >> $GITHUB_ENV
+          echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
+
+      # ==========================================================
+      # 4️⃣ CREATE SERVICE ACCOUNT FILE (CRITICAL FIX)
+      # ==========================================================
+      - name: Create service account file
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.SECUREFILE }}" ]; then
+            echo "❌ SECUREFILE secret not set"
+            exit 1
+          fi
+
+          echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
+          chmod 600 "$SERVICE_ACCOUNT_FILE"
+
+          echo "✅ Service account file created:"
+          ls -l "$SERVICE_ACCOUNT_FILE"
+
+      # ==========================================================
+      # 5️⃣ SETUP TOOLS
+      # ==========================================================
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 11
+
+      - name: Install tools
+        shell: bash
+        run: |
+          npm install -g apigeelint newman newman-reporter-html
+
+      # ==========================================================
+      # 6️⃣ GENERATE ACCESS TOKEN (AZURE SCRIPT, FIXED PARSING)
+      # ==========================================================
+      - name: Generate access token
+        shell: bash
+        run: |
+          chmod +x scripts/revision.sh
+
+          FIRST_PROXY=$(echo "$SELECTED_PROXIES" | awk '{print $1}')
+
+          OUTPUT=$(scripts/revision.sh \
+            "$ORG" \
+            "$FIRST_PROXY" \
+            "$APIGEE_ENVIRONMENT" \
+            "$SERVICE_ACCOUNT_FILE" 2>&1)
+
+          echo "========= revision.sh OUTPUT ========="
+          echo "$OUTPUT"
+          echo "====================================="
+
+          TOKEN=$(echo "$OUTPUT" | grep -oE 'ya29\.[A-Za-z0-9._-]+')
+
+          if [ -z "$TOKEN" ]; then
+            echo "❌ Failed to extract access token"
+            exit 1
+          fi
+
+          echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
+
+      # ==========================================================
+      # 7️⃣ LINT + DEPLOY + INTEGRATION
       # ==========================================================
       - name: Lint, Deploy & Integration
         shell: bash
         run: |
+          SUCCESS=""
+          FAILED=""
+          HAS_FAILURE=0
+
           for proxy in $SELECTED_PROXIES; do
-            echo ""
-            echo "🚀 Processing proxy: $proxy"
+            echo "===================================="
+            echo "🚦 Processing $proxy"
+            echo "===================================="
 
             PROXY_DIR="api-proxies/$proxy/apiproxy"
             POM_FILE="api-proxies/$proxy/pom.xml"
             TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
 
-            # ---------- LINT ----------
-            apigeelint -s "$PROXY_DIR" --profile apigeex
+            # LINT
+            apigeelint -s "$PROXY_DIR" --profile apigeex || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
 
-            # ---------- DEPLOY ----------
+            # DEPLOY
             mvn clean install \
               -f "$POM_FILE" \
-              -P$APIGEE_ENVIRONMENT \
-              -Dorg=$ORG \
-              -Dbearer=$ACCESS_TOKEN
+              -P "$APIGEE_ENVIRONMENT" \
+              -Dorg="$ORG" \
+              -Dbearer="$ACCESS_TOKEN" || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
 
-            # ---------- INTEGRATION ----------
+            # INTEGRATION
             if [ -f "$TEST_FILE" ]; then
-              newman run "$TEST_FILE"
+              newman run "$TEST_FILE" || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
             fi
+
+            SUCCESS="$SUCCESS $proxy"
           done
 
+          echo "SUCCESS=$SUCCESS" >> $GITHUB_ENV
+          echo "FAILED=$FAILED" >> $GITHUB_ENV
+
+          if [ $HAS_FAILURE -eq 1 ]; then
+            echo "❌ One or more proxies failed"
+            exit 1
+          fi
+
       # ==========================================================
-      # 5️⃣ FINAL SUMMARY
+      # 8️⃣ FINAL SUMMARY
       # ==========================================================
       - name: Final Summary
         if: always()
         shell: bash
         run: |
-          echo ""
           echo "======================================"
           echo "🚀 MANUAL DEPLOY SUMMARY"
           echo "======================================"
           echo ""
-          for p in $SELECTED_PROXIES; do
-            echo "✅ $p"
-          done
+          echo "✅ SUCCESS:"
+          echo "${SUCCESS:-None}"
+          echo ""
+          echo "❌ FAILED:"
+          echo "${FAILED:-None}"

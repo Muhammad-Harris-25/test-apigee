@@ -1,46 +1,39 @@
-name: Apigee - Detect Proxies (Auto)
-
-on:
-  push:
-    branches: [dev, uat, prod]
-    paths:
-      - api-proxies/**
-
-permissions:
-  contents: write
-
-jobs:
-  detect:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Detect proxies
-        shell: bash
-        run: |
-          BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
-
-          git diff --name-only "$BASE" HEAD \
-            | grep '^api-proxies/' \
-            | cut -d'/' -f2 \
-            | sort -u > .github/detected_proxies.txt || true
-
-          if [ ! -s .github/detected_proxies.txt ]; then
-            echo "No proxies detected"
-            exit 0
-          fi
-
-      - name: Commit detected proxies file
-        shell: bash
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-
-          git add .github/detected_proxies.txt
-          git diff --cached --quiet && exit 0
-
-          git commit -m "ci: update detected proxies [skip ci]"
-          git push
+#name: Apigee - Detect Proxies (Auto)
+#
+#on:
+#  push:
+#    branches: [dev, uat, prod]
+#    paths:
+#      - api-proxies/**
+#
+#permissions:
+#  contents: write
+#
+#jobs:
+#  detect:
+#    runs-on: ubuntu-latest
+#
+#    steps:
+#      - uses: actions/checkout@v4
+#        with:
+##
+#      - name: Detect proxies
+ #       shell: bash
+  #      run: |
+   #       BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
+#
+ #         git diff --name-only "$BASE" HEAD \
+  #          | grep '^api-proxies/' \
+   #         | cut -d'/' -f2 \
+    #        | sort -u > .github/detected_proxies.txt || true
+#
+ ##          echo "No proxies detected"
+   #         exit 0
+    #      fi
+#
+ #     - name: Commit detected proxies file
+  ###      git config user.name "github-actions"
+     #     git config user.email "github-actions@github.com"
+#
+ #         git add .github/detected_proxies.txt
+  ####     git push
