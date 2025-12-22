@@ -1,4 +1,4 @@
-name: Apigee - Auto Deploy
+name: Apigee - Detect Proxies (Auto)
 
 on:
   push:
@@ -7,54 +7,40 @@ on:
       - api-proxies/**
 
 permissions:
-  contents: write   # needed because detect workflow updates file
+  contents: write
 
 jobs:
-  deploy:
+  detect:
     runs-on: ubuntu-latest
 
     steps:
-      # ==========================================================
-      # 1️⃣ CHECKOUT
-      # ==========================================================
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ==========================================================
-      # 2️⃣ SHOW DETECTED PROXIES FROM FILE
-      # ==========================================================
-      - name: Show detected proxies
+      - name: Detect proxies
         shell: bash
         run: |
-          FILE=".github/detected_proxies.txt"
+          BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
 
-          if [ ! -f "$FILE" ]; then
-            echo "❌ detected_proxies.txt not found in repo"
-            exit 1
+          git diff --name-only "$BASE" HEAD \
+            | grep '^api-proxies/' \
+            | cut -d'/' -f2 \
+            | sort -u > .github/detected_proxies.txt || true
+
+          if [ ! -s .github/detected_proxies.txt ]; then
+            echo "No proxies detected"
+            exit 0
           fi
 
-          echo ""
-          echo "======================================"
-          echo "🔍 DETECTED APIGEE PROXIES (AUTO)"
-          echo "======================================"
-          cat "$FILE"
-          echo ""
-
-      # ==========================================================
-      # 3️⃣ RESOLVE PROXIES (AUTO = ALL)
-      # ==========================================================
-      - name: Resolve proxies (auto mode)
+      - name: Commit detected proxies file
         shell: bash
         run: |
-          DETECTED=$(cat .github/detected_proxies.txt)
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
 
-          if [ -z "$DETECTED" ]; then
-            echo "❌ No proxies detected"
-            exit 1
-          fi
+          git add .github/detected_proxies.txt
+          git diff --cached --quiet && exit 0
 
-          SELECTED="$DETECTED"
-
-          echo "SELECTED_PROXIES=$SELECTED" >> $GITHUB_ENV
+          git commit -m "ci: update detected proxies [skip ci]"
+          git push

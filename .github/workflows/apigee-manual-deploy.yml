@@ -13,13 +13,13 @@ jobs:
 
     steps:
       # ==========================================================
-      # 1️⃣ CHECKOUT
+      # 1️⃣ CHECKOUT REPOSITORY
       # ==========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # ==========================================================
-      # 2️⃣ SHOW DETECTED PROXIES FROM FILE
+      # 2️⃣ VERIFY & SHOW DETECTED PROXIES FILE
       # ==========================================================
       - name: Show detected proxies
         shell: bash
@@ -28,6 +28,12 @@ jobs:
 
           if [ ! -f "$FILE" ]; then
             echo "❌ detected_proxies.txt not found in repo"
+            echo "➡️ Run 'Apigee - Detect Changed Proxies' workflow first"
+            exit 1
+          fi
+
+          if [ ! -s "$FILE" ]; then
+            echo "❌ detected_proxies.txt is empty"
             exit 1
           fi
 
@@ -50,7 +56,7 @@ jobs:
           INPUT="${{ github.event.inputs.proxies }}"
 
           if [ -z "$INPUT" ]; then
-            echo "❌ No input provided"
+            echo "❌ No proxies input provided"
             exit 1
           fi
 
@@ -64,6 +70,8 @@ jobs:
               p=$(echo "$p" | xargs)
               if ! echo "$DETECTED" | grep -qw "$p"; then
                 echo "❌ Invalid proxy: $p"
+                echo "➡️ Must be one of:"
+                echo "$DETECTED"
                 exit 1
               fi
               SELECTED="$SELECTED $p"
@@ -86,7 +94,7 @@ jobs:
       # ==========================================================
       # 4️⃣ LINT + DEPLOY + INTEGRATION
       # ==========================================================
-      - name: Lint, Deploy & Integration Test
+      - name: Lint, Deploy & Integration
         shell: bash
         run: |
           for proxy in $SELECTED_PROXIES; do
@@ -97,17 +105,17 @@ jobs:
             POM_FILE="api-proxies/$proxy/pom.xml"
             TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
 
-            # ---- LINT ----
+            # ---------- LINT ----------
             apigeelint -s "$PROXY_DIR" --profile apigeex
 
-            # ---- DEPLOY ----
+            # ---------- DEPLOY ----------
             mvn clean install \
               -f "$POM_FILE" \
               -P$APIGEE_ENVIRONMENT \
               -Dorg=$ORG \
               -Dbearer=$ACCESS_TOKEN
 
-            # ---- INTEGRATION ----
+            # ---------- INTEGRATION ----------
             if [ -f "$TEST_FILE" ]; then
               newman run "$TEST_FILE"
             fi
