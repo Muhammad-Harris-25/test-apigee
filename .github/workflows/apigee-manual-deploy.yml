@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       proxies:
-        description: "Type proxy names (comma-separated) OR ALL (see detected list in logs)"
+        description: "Comma-separated proxy names OR ALL (see detected list in logs)"
         required: true
 
 env:
@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
 
       # ==========================================================
-      # 1️⃣ SHOW DETECTED PROXIES (FROM FILE)
+      # 1️⃣ SHOW DETECTED PROXIES
       # ==========================================================
       - name: Show detected proxies
         shell: bash
@@ -57,11 +57,6 @@ jobs:
           DETECTED=$(cat .github/detected_proxies.txt)
           INPUT="${{ github.event.inputs.proxies }}"
 
-          if [ -z "$INPUT" ]; then
-            echo "❌ No input provided"
-            exit 1
-          fi
-
           if [ "$INPUT" = "ALL" ]; then
             SELECTED="$DETECTED"
           else
@@ -71,8 +66,6 @@ jobs:
               p=$(echo "$p" | xargs)
               if ! echo "$DETECTED" | grep -qw "$p"; then
                 echo "❌ Invalid proxy: $p"
-                echo "Valid proxies are:"
-                echo "$DETECTED"
                 exit 1
               fi
               SELECTED="$SELECTED $p"
@@ -92,13 +85,13 @@ jobs:
           done
 
       # ==========================================================
-      # 3️⃣ LOAD APIGEE VARIABLES
+      # 3️⃣ LOAD APIGEE VARIABLES (REPO VARIABLES)
       # ==========================================================
       - name: Load Apigee variables
         shell: bash
         run: |
-          if [ -z "${{ vars.ORG }}" ] || [ -z "${{ vars.APIGEE_ENVIRONMENT }}" ]; then
-            echo "❌ ORG / APIGEE_ENVIRONMENT not set in repo variables"
+          if [ -z "${{ vars.ORG }}" ] || [ -z "${{ vars.APIGEE_ENVIRONMENT }}" ] || [ -z "${{ vars.SERVICE_ACCOUNT_FILE }}" ]; then
+            echo "❌ Required repo variables missing"
             exit 1
           fi
 
@@ -107,7 +100,24 @@ jobs:
           echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
 
       # ==========================================================
-      # 4️⃣ SETUP TOOLS
+      # 4️⃣ CREATE SERVICE ACCOUNT FILE (CRITICAL FIX)
+      # ==========================================================
+      - name: Create service account file
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.SECUREFILE }}" ]; then
+            echo "❌ SECUREFILE secret not set"
+            exit 1
+          fi
+
+          echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
+          chmod 600 "$SERVICE_ACCOUNT_FILE"
+
+          echo "✅ Service account file created:"
+          ls -l "$SERVICE_ACCOUNT_FILE"
+
+      # ==========================================================
+      # 5️⃣ SETUP TOOLS
       # ==========================================================
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -126,13 +136,11 @@ jobs:
           npm install -g apigeelint newman newman-reporter-html
 
       # ==========================================================
-      # 5️⃣ GENERATE ACCESS TOKEN (AZURE SCRIPT – FIXED PARSING)
+      # 6️⃣ GENERATE ACCESS TOKEN (AZURE SCRIPT, FIXED PARSING)
       # ==========================================================
       - name: Generate access token
         shell: bash
         run: |
-          set -e
-
           chmod +x scripts/revision.sh
 
           FIRST_PROXY=$(echo "$SELECTED_PROXIES" | awk '{print $1}')
@@ -149,8 +157,6 @@ jobs:
 
           TOKEN=$(echo "$OUTPUT" | grep -oE 'ya29\.[A-Za-z0-9._-]+')
 
-          echo "Extracted token length: ${#TOKEN}"
-
           if [ -z "$TOKEN" ]; then
             echo "❌ Failed to extract access token"
             exit 1
@@ -159,15 +165,13 @@ jobs:
           echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
 
       # ==========================================================
-      # 6️⃣ LINT + DEPLOY + INTEGRATION
+      # 7️⃣ LINT + DEPLOY + INTEGRATION
       # ==========================================================
       - name: Lint, Deploy & Integration
         shell: bash
         run: |
           SUCCESS=""
-          FAILED_LINT=""
-          FAILED_DEPLOY=""
-          FAILED_INTEGRATION=""
+          FAILED=""
           HAS_FAILURE=0
 
           for proxy in $SELECTED_PROXIES; do
@@ -179,46 +183,26 @@ jobs:
             POM_FILE="api-proxies/$proxy/pom.xml"
             TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
 
-            # ---------- LINT ----------
-            apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex
-            LINT_EXIT=$?
+            # LINT
+            apigeelint -s "$PROXY_DIR" --profile apigeex || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
 
-            if [ $LINT_EXIT -ne 0 ]; then
-              FAILED_LINT="$FAILED_LINT $proxy"
-              HAS_FAILURE=1
-              continue
-            fi
-
-            # ---------- DEPLOY ----------
+            # DEPLOY
             mvn clean install \
               -f "$POM_FILE" \
               -P "$APIGEE_ENVIRONMENT" \
               -Dorg="$ORG" \
-              -Dbearer="$ACCESS_TOKEN"
+              -Dbearer="$ACCESS_TOKEN" || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
 
-            if [ $? -ne 0 ]; then
-              FAILED_DEPLOY="$FAILED_DEPLOY $proxy"
-              HAS_FAILURE=1
-              continue
-            fi
-
-            # ---------- INTEGRATION ----------
+            # INTEGRATION
             if [ -f "$TEST_FILE" ]; then
-              newman run "$TEST_FILE"
-              if [ $? -ne 0 ]; then
-                FAILED_INTEGRATION="$FAILED_INTEGRATION $proxy"
-                HAS_FAILURE=1
-                continue
-              fi
+              newman run "$TEST_FILE" || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
             fi
 
             SUCCESS="$SUCCESS $proxy"
           done
 
           echo "SUCCESS=$SUCCESS" >> $GITHUB_ENV
-          echo "FAILED_LINT=$FAILED_LINT" >> $GITHUB_ENV
-          echo "FAILED_DEPLOY=$FAILED_DEPLOY" >> $GITHUB_ENV
-          echo "FAILED_INTEGRATION=$FAILED_INTEGRATION" >> $GITHUB_ENV
+          echo "FAILED=$FAILED" >> $GITHUB_ENV
 
           if [ $HAS_FAILURE -eq 1 ]; then
             echo "❌ One or more proxies failed"
@@ -226,7 +210,7 @@ jobs:
           fi
 
       # ==========================================================
-      # 7️⃣ FINAL SUMMARY
+      # 8️⃣ FINAL SUMMARY
       # ==========================================================
       - name: Final Summary
         if: always()
@@ -239,11 +223,5 @@ jobs:
           echo "✅ SUCCESS:"
           echo "${SUCCESS:-None}"
           echo ""
-          echo "❌ LINT FAILED:"
-          echo "${FAILED_LINT:-None}"
-          echo ""
-          echo "❌ DEPLOY FAILED:"
-          echo "${FAILED_DEPLOY:-None}"
-          echo ""
-          echo "❌ INTEGRATION FAILED:"
-          echo "${FAILED_INTEGRATION:-None}"
+          echo "❌ FAILED:"
+          echo "${FAILED:-None}"
