@@ -1,55 +1,46 @@
-name: Apigee - Manual Deploy
+name: Apigee - Detect Proxies (Auto)
 
 on:
-  workflow_dispatch:
-    inputs:
-      proxies:
-        description: "Comma-separated proxy names OR ALL (see detected_proxies.txt)"
-        required: true
+  push:
+    branches: [dev, uat, prod]
+    paths:
+      - api-proxies/**
+
+permissions:
+  contents: write
 
 jobs:
-  deploy:
+  detect:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Show detected proxies
+      - name: Detect proxies
         shell: bash
         run: |
-          if [ ! -f .github/detected_proxies.txt ]; then
-            echo "❌ detected_proxies.txt not found"
-            exit 1
+          BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
+
+          git diff --name-only "$BASE" HEAD \
+            | grep '^api-proxies/' \
+            | cut -d'/' -f2 \
+            | sort -u > .github/detected_proxies.txt || true
+
+          if [ ! -s .github/detected_proxies.txt ]; then
+            echo "No proxies detected"
+            exit 0
           fi
 
-          echo "Detected proxies from last run:"
-          cat .github/detected_proxies.txt
-
-          echo ""
-          echo "➡️ Copy names into workflow input"
-
-      - name: Resolve selected proxies
+      - name: Commit detected proxies file
         shell: bash
         run: |
-          DETECTED=$(cat .github/detected_proxies.txt)
-          INPUT="${{ github.event.inputs.proxies }}"
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
 
-          if [ "$INPUT" = "ALL" ]; then
-            SELECTED="$DETECTED"
-          else
-            SELECTED=""
-            IFS=',' read -r -a USER <<< "$INPUT"
-            for p in "${USER[@]}"; do
-              p=$(echo "$p" | xargs)
-              if ! echo "$DETECTED" | grep -qw "$p"; then
-                echo "❌ Invalid proxy: $p"
-                exit 1
-              fi
-              SELECTED="$SELECTED $p"
-            done
-          fi
+          git add .github/detected_proxies.txt
+          git diff --cached --quiet && exit 0
 
-          echo "SELECTED_PROXIES=$SELECTED" >> $GITHUB_ENV
-          echo "Using proxies: $SELECTED"
-
-      # 🔽 continue with lint / deploy / test
+          git commit -m "ci: update detected proxies [skip ci]"
+          git push
