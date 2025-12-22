@@ -1,3 +1,2 @@
 test-call
 test-proxy1
-test-proxy2
