@@ -9,6 +9,7 @@ on:
         type: choice
         options:
           - dev
+          - demo
           - uat
           - prod
 
@@ -25,7 +26,7 @@ jobs:
     name: Deploy Apigee Proxies
     runs-on: ubuntu-latest
 
-    # 🔒 Enable approvals for prod environment in GitHub UI
+    # 🔒 Enable environment approvals (recommended for prod)
     environment:
       name: ${{ github.event.inputs.environment }}
 
@@ -37,7 +38,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ==========================================================
-      # 1️⃣ INVENTORY PROXIES
+      # 1️⃣ INVENTORY PROXIES (SOURCE OF TRUTH)
       # ==========================================================
       - name: Read proxies from api-proxies folder
         shell: bash
@@ -60,11 +61,14 @@ jobs:
           echo "$PROXIES" >> "$GITHUB_ENV"
           echo "EOF" >> "$GITHUB_ENV"
 
-          echo "📦 Available proxies:"
+          echo "======================================"
+          echo "📦 AVAILABLE APIGEE PROXIES"
+          echo "======================================"
           echo "$PROXIES"
+          echo ""
 
       # ==========================================================
-      # 2️⃣ RESOLVE USER SELECTION
+      # 2️⃣ RESOLVE USER SELECTION (ENTERPRISE CHECKS)
       # ==========================================================
       - name: Resolve selected proxy
         shell: bash
@@ -74,25 +78,45 @@ jobs:
           INPUT="${{ github.event.inputs.proxy }}"
           PROXIES="$AVAILABLE_PROXIES"
 
+          echo "======================================"
+          echo "🧾 PROXY SELECTION VALIDATION"
+          echo "======================================"
+          echo "➡️ User input:"
+          echo "   $INPUT"
+          echo ""
+          echo "📦 Available proxies:"
+          echo "$PROXIES"
+          echo "--------------------------------------"
+
           if [[ "$INPUT" == "ALL" ]]; then
             SELECTED="$PROXIES"
+            echo "✅ User selected ALL proxies"
           else
             if ! echo "$PROXIES" | grep -qx "$INPUT"; then
               echo "❌ Invalid proxy selection: $INPUT"
+              echo ""
+              echo "✅ Allowed values:"
+              echo "$PROXIES"
+              echo ""
+              echo "ℹ️ Tip: Use 'ALL' to deploy all proxies"
               exit 1
             fi
+
             SELECTED="$INPUT"
+            echo "✅ Valid proxy selected: $INPUT"
           fi
+
+          echo "--------------------------------------"
+          echo "🚀 Proxies that will be deployed:"
+          echo "$SELECTED"
+          echo "======================================"
 
           echo "SELECTED_PROXIES<<EOF" >> "$GITHUB_ENV"
           echo "$SELECTED" >> "$GITHUB_ENV"
           echo "EOF" >> "$GITHUB_ENV"
 
-          echo "✅ Selected proxies:"
-          echo "$SELECTED"
-
       # ==========================================================
-      # 3️⃣ LOAD APIGEE CONFIGURATION (SAFE)
+      # 3️⃣ LOAD APIGEE CONFIGURATION
       # ==========================================================
       - name: Load Apigee configuration
         shell: bash
@@ -168,7 +192,7 @@ jobs:
           echo "✅ Access token generated"
 
       # ==========================================================
-      # 7️⃣ LINT → DEPLOY → TEST (FIXED EXIT LOGIC)
+      # 7️⃣ LINT → DEPLOY → TEST
       # ==========================================================
       - name: Lint, Deploy & Test
         shell: bash
@@ -224,11 +248,7 @@ jobs:
           echo "SUCCESS=${SUCCESS[*]}" >> "$GITHUB_ENV"
           echo "FAILED=${FAILED[*]}" >> "$GITHUB_ENV"
 
-          if [[ $HAS_FAILURE -eq 1 ]]; then
-            exit 1
-          else
-            exit 0
-          fi
+          [[ $HAS_FAILURE -eq 1 ]] && exit 1 || exit 0
 
       # ==========================================================
       # 8️⃣ FINAL SUMMARY
