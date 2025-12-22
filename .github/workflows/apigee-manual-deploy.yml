@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       proxies:
-        description: "Comma-separated proxy names OR ALL (see detected list in logs)"
+        description: "Type proxy names (comma-separated) OR ALL (see detected list in logs)"
         required: true
 
 env:
@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
 
       # ==========================================================
-      # 1️⃣ SHOW DETECTED PROXIES (FROM GIT FILE)
+      # 1️⃣ SHOW DETECTED PROXIES (FROM FILE)
       # ==========================================================
       - name: Show detected proxies
         shell: bash
@@ -33,6 +33,12 @@ jobs:
 
           if [ ! -f "$FILE" ]; then
             echo "❌ detected_proxies.txt not found"
+            echo "➡️ Run auto-detect workflow first"
+            exit 1
+          fi
+
+          if [ ! -s "$FILE" ]; then
+            echo "❌ detected_proxies.txt is empty"
             exit 1
           fi
 
@@ -51,6 +57,11 @@ jobs:
           DETECTED=$(cat .github/detected_proxies.txt)
           INPUT="${{ github.event.inputs.proxies }}"
 
+          if [ -z "$INPUT" ]; then
+            echo "❌ No input provided"
+            exit 1
+          fi
+
           if [ "$INPUT" = "ALL" ]; then
             SELECTED="$DETECTED"
           else
@@ -60,14 +71,25 @@ jobs:
               p=$(echo "$p" | xargs)
               if ! echo "$DETECTED" | grep -qw "$p"; then
                 echo "❌ Invalid proxy: $p"
+                echo "Valid proxies are:"
+                echo "$DETECTED"
                 exit 1
               fi
               SELECTED="$SELECTED $p"
             done
           fi
 
+          if [ -z "$SELECTED" ]; then
+            echo "❌ No valid proxies selected"
+            exit 1
+          fi
+
           echo "SELECTED_PROXIES=$SELECTED" >> $GITHUB_ENV
-          echo "Selected proxies: $SELECTED"
+
+          echo "Selected proxies:"
+          for p in $SELECTED; do
+            echo " - $p"
+          done
 
       # ==========================================================
       # 3️⃣ LOAD APIGEE VARIABLES
@@ -75,12 +97,17 @@ jobs:
       - name: Load Apigee variables
         shell: bash
         run: |
+          if [ -z "${{ vars.ORG }}" ] || [ -z "${{ vars.APIGEE_ENVIRONMENT }}" ]; then
+            echo "❌ ORG / APIGEE_ENVIRONMENT not set in repo variables"
+            exit 1
+          fi
+
           echo "ORG=${{ vars.ORG }}" >> $GITHUB_ENV
           echo "APIGEE_ENVIRONMENT=${{ vars.APIGEE_ENVIRONMENT }}" >> $GITHUB_ENV
           echo "SERVICE_ACCOUNT_FILE=${{ vars.SERVICE_ACCOUNT_FILE }}" >> $GITHUB_ENV
 
       # ==========================================================
-      # 4️⃣ SETUP TOOLS (FROM YOUR AZURE FLOW)
+      # 4️⃣ SETUP TOOLS
       # ==========================================================
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -99,11 +126,13 @@ jobs:
           npm install -g apigeelint newman newman-reporter-html
 
       # ==========================================================
-      # 5️⃣ GENERATE ACCESS TOKEN (AZURE STYLE – NO SCRIPT CHANGE)
+      # 5️⃣ GENERATE ACCESS TOKEN (AZURE SCRIPT – FIXED PARSING)
       # ==========================================================
       - name: Generate access token
         shell: bash
         run: |
+          set -e
+
           chmod +x scripts/revision.sh
 
           FIRST_PROXY=$(echo "$SELECTED_PROXIES" | awk '{print $1}')
@@ -114,25 +143,27 @@ jobs:
             "$APIGEE_ENVIRONMENT" \
             "$SERVICE_ACCOUNT_FILE" 2>&1)
 
-          TOKEN=$(echo "$OUTPUT" \
-            | sed -n 's/.*variable=access_token;isOutput=true]\(.*\)/\1/p')
+          echo "========= revision.sh OUTPUT ========="
+          echo "$OUTPUT"
+          echo "====================================="
+
+          TOKEN=$(echo "$OUTPUT" | grep -oE 'ya29\.[A-Za-z0-9._-]+')
+
+          echo "Extracted token length: ${#TOKEN}"
 
           if [ -z "$TOKEN" ]; then
             echo "❌ Failed to extract access token"
-            echo "$OUTPUT"
             exit 1
           fi
 
           echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
 
       # ==========================================================
-      # 6️⃣ LINT + DEPLOY + INTEGRATION (AZURE LOGIC)
+      # 6️⃣ LINT + DEPLOY + INTEGRATION
       # ==========================================================
-      - name: Lint, Deploy & Integration Test
+      - name: Lint, Deploy & Integration
         shell: bash
         run: |
-          mkdir -p reports
-
           SUCCESS=""
           FAILED_LINT=""
           FAILED_DEPLOY=""
@@ -147,15 +178,10 @@ jobs:
             PROXY_DIR="api-proxies/$proxy/apiproxy"
             POM_FILE="api-proxies/$proxy/pom.xml"
             TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
-            REPORT_DIR="reports/$proxy"
-
-            mkdir -p "$REPORT_DIR"
 
             # ---------- LINT ----------
             apigeelint -s "$PROXY_DIR" -f table.js --profile apigeex
             LINT_EXIT=$?
-
-            apigeelint -s "$PROXY_DIR" -f html.js --profile apigeex > "$REPORT_DIR/lint.html"
 
             if [ $LINT_EXIT -ne 0 ]; then
               FAILED_LINT="$FAILED_LINT $proxy"
@@ -178,10 +204,7 @@ jobs:
 
             # ---------- INTEGRATION ----------
             if [ -f "$TEST_FILE" ]; then
-              newman run "$TEST_FILE" \
-                --reporters cli,html \
-                --reporter-html-export "$REPORT_DIR/integration.html"
-
+              newman run "$TEST_FILE"
               if [ $? -ne 0 ]; then
                 FAILED_INTEGRATION="$FAILED_INTEGRATION $proxy"
                 HAS_FAILURE=1
@@ -198,32 +221,22 @@ jobs:
           echo "FAILED_INTEGRATION=$FAILED_INTEGRATION" >> $GITHUB_ENV
 
           if [ $HAS_FAILURE -eq 1 ]; then
-            echo "❌ One or more stages failed"
+            echo "❌ One or more proxies failed"
             exit 1
           fi
 
       # ==========================================================
-      # 7️⃣ UPLOAD REPORTS
-      # ==========================================================
-      - name: Upload reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: proxy-reports
-          path: reports
-
-      # ==========================================================
-      # 8️⃣ FINAL SUMMARY
+      # 7️⃣ FINAL SUMMARY
       # ==========================================================
       - name: Final Summary
         if: always()
         shell: bash
         run: |
           echo "======================================"
-          echo "🚀 FINAL PIPELINE SUMMARY"
+          echo "🚀 MANUAL DEPLOY SUMMARY"
           echo "======================================"
           echo ""
-          echo "✅ SUCCESSFUL PROXIES:"
+          echo "✅ SUCCESS:"
           echo "${SUCCESS:-None}"
           echo ""
           echo "❌ LINT FAILED:"
@@ -234,5 +247,3 @@ jobs:
           echo ""
           echo "❌ INTEGRATION FAILED:"
           echo "${FAILED_INTEGRATION:-None}"
-
-          
