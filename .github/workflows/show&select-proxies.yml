@@ -1,0 +1,260 @@
+name: Apigee - Enterprise Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - dev
+          - uat
+          - prod
+
+      proxy:
+        description: "Proxy name to deploy OR ALL"
+        required: true
+        type: string
+
+env:
+  NODE_VERSION: 18
+
+jobs:
+  deploy:
+    name: Deploy Apigee Proxies
+    runs-on: ubuntu-latest
+
+    # 🔒 Environment protection (use approvals for prod)
+    environment:
+      name: ${{ github.event.inputs.environment }}
+
+    steps:
+      # ==========================================================
+      # 0️⃣ CHECKOUT
+      # ==========================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ==========================================================
+      # 1️⃣ INVENTORY PROXIES (SOURCE OF TRUTH)
+      # ==========================================================
+      - name: Read proxies from api-proxies folder
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -d api-proxies ]]; then
+            echo "❌ api-proxies folder not found"
+            exit 1
+          fi
+
+          PROXIES=$(find api-proxies -maxdepth 1 -mindepth 1 -type d -printf "%f\n")
+
+          if [[ -z "$PROXIES" ]]; then
+            echo "❌ No proxies found in api-proxies"
+            exit 1
+          fi
+
+          echo "AVAILABLE_PROXIES<<EOF" >> "$GITHUB_ENV"
+          echo "$PROXIES" >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+
+          echo "📦 Available proxies:"
+          echo "$PROXIES"
+
+      # ==========================================================
+      # 2️⃣ RESOLVE & VALIDATE USER SELECTION
+      # ==========================================================
+      - name: Resolve selected proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INPUT="${{ github.event.inputs.proxy }}"
+          PROXIES="$AVAILABLE_PROXIES"
+
+          if [[ "$INPUT" == "ALL" ]]; then
+            SELECTED="$PROXIES"
+          else
+            if ! echo "$PROXIES" | grep -qx "$INPUT"; then
+              echo "❌ Invalid proxy selection: $INPUT"
+              exit 1
+            fi
+            SELECTED="$INPUT"
+          fi
+
+          echo "SELECTED_PROXIES<<EOF" >> "$GITHUB_ENV"
+          echo "$SELECTED" >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+
+          echo "✅ Selected proxies:"
+          echo "$SELECTED"
+
+      # ==========================================================
+      # 3️⃣ LOAD ENV-SCOPED VARIABLES (SAFE)
+      # ==========================================================
+      - name: Load Apigee configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ORG="${{ vars.ORG }}"
+          APIGEE_ENVIRONMENT="${{ vars.APIGEE_ENVIRONMENT }}"
+          SERVICE_ACCOUNT_FILE="${{ vars.SERVICE_ACCOUNT_FILE }}"
+
+          if [[ -z "$ORG" ]]; then
+            echo "❌ ORG variable missing"
+            exit 1
+          fi
+
+          if [[ -z "$APIGEE_ENVIRONMENT" ]]; then
+            echo "❌ APIGEE_ENVIRONMENT variable missing"
+            exit 1
+          fi
+
+          if [[ -z "$SERVICE_ACCOUNT_FILE" ]]; then
+            echo "❌ SERVICE_ACCOUNT_FILE variable missing"
+            exit 1
+          fi
+
+          echo "ORG=$ORG" >> "$GITHUB_ENV"
+          echo "APIGEE_ENVIRONMENT=$APIGEE_ENVIRONMENT" >> "$GITHUB_ENV"
+          echo "SERVICE_ACCOUNT_FILE=$SERVICE_ACCOUNT_FILE" >> "$GITHUB_ENV"
+
+      # ==========================================================
+      # 4️⃣ AUTHENTICATION (SERVICE ACCOUNT)
+      # ==========================================================
+      - name: Create service account file
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${{ secrets.SECUREFILE }}" ]]; then
+            echo "❌ SECUREFILE secret not set"
+            exit 1
+          fi
+
+          echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
+          chmod 600 "$SERVICE_ACCOUNT_FILE"
+
+          echo "🔐 Service account file created"
+
+      # ==========================================================
+      # 5️⃣ TOOLCHAIN SETUP
+      # ==========================================================
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 11
+
+      - name: Install tools
+        shell: bash
+        run: |
+          npm install -g apigeelint@2 newman@6
+
+      # ==========================================================
+      # 6️⃣ GENERATE ACCESS TOKEN (ONCE)
+      # ==========================================================
+      - name: Generate Apigee access token
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chmod +x scripts/revision.sh
+          FIRST_PROXY=$(echo "$SELECTED_PROXIES" | head -n1)
+
+          OUTPUT=$(scripts/revision.sh \
+            "$ORG" \
+            "$FIRST_PROXY" \
+            "$APIGEE_ENVIRONMENT" \
+            "$SERVICE_ACCOUNT_FILE" 2>&1)
+
+          TOKEN=$(echo "$OUTPUT" | grep -oE 'ya29\.[A-Za-z0-9._-]+')
+
+          if [[ -z "$TOKEN" ]]; then
+            echo "❌ Failed to extract access token"
+            exit 1
+          fi
+
+          echo "ACCESS_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "✅ Access token generated"
+
+      # ==========================================================
+      # 7️⃣ LINT → DEPLOY → OPTIONAL TEST
+      # ==========================================================
+      - name: Lint, Deploy & Test
+        shell: bash
+        run: |
+          set +e
+
+          SUCCESS=()
+          FAILED=()
+
+          while read -r proxy; do
+            echo "===================================="
+            echo "🚀 Processing proxy: $proxy"
+            echo "===================================="
+
+            BASE="api-proxies/$proxy"
+
+            if [[ ! -d "$BASE/apiproxy" || ! -f "$BASE/pom.xml" ]]; then
+              echo "❌ Invalid proxy structure: $proxy"
+              FAILED+=("$proxy")
+              continue
+            fi
+
+            echo "🧹 Linting..."
+            apigeelint -s "$BASE/apiproxy" --profile apigeex || {
+              FAILED+=("$proxy")
+              continue
+            }
+
+            echo "🚀 Deploying..."
+            mvn clean install -f "$BASE/pom.xml" \
+              -P "$APIGEE_ENVIRONMENT" \
+              -Dorg="$ORG" \
+              -Dbearer="$ACCESS_TOKEN" || {
+                FAILED+=("$proxy")
+                continue
+              }
+
+            TEST_FILE="$BASE/tests/integration/PassCollection.json"
+            if [[ -f "$TEST_FILE" ]]; then
+              echo "🧪 Running integration tests..."
+              newman run "$TEST_FILE" || {
+                FAILED+=("$proxy")
+                continue
+              }
+            fi
+
+            SUCCESS+=("$proxy")
+          done <<< "$SELECTED_PROXIES"
+
+          echo "SUCCESS=${SUCCESS[*]}" >> "$GITHUB_ENV"
+          echo "FAILED=${FAILED[*]}" >> "$GITHUB_ENV"
+
+          [[ ${#FAILED[@]} -gt 0 ]] && exit 1
+
+      # ==========================================================
+      # 8️⃣ FINAL SUMMARY
+      # ==========================================================
+      - name: Deployment Summary
+        if: always()
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "🏢 ENTERPRISE APIGEE DEPLOY SUMMARY"
+          echo "======================================"
+          echo "Environment : ${{ github.event.inputs.environment }}"
+          echo "Organization: $ORG"
+          echo ""
+          echo "✅ Successful:"
+          echo "${SUCCESS:-None}"
+          echo ""
+          echo "❌ Failed:"
+          echo "${FAILED:-None}"
