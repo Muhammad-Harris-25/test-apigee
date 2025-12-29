@@ -199,13 +199,18 @@ jobs:
           echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
 
       # ==========================================================
-      # 7️⃣ LINT + DEPLOY + INTEGRATION
+      # 7️⃣ LINT + DEPLOY + INTEGRATION (Enhanced with Table)
       # ==========================================================
       - name: Lint, Deploy & Integration
         shell: bash
         run: |
+          echo "| Proxy | Lint | Deploy | Integration |" > lint_report.md
+          echo "|-------|------|--------|-------------|" >> lint_report.md
+
           SUCCESS=""
-          FAILED=""
+          LINT_FAILED=""
+          DEPLOY_FAILED=""
+          INTEGRATION_FAILED=""
           HAS_FAILURE=0
 
           for proxy in $SELECTED_PROXIES; do
@@ -217,47 +222,93 @@ jobs:
             POM_FILE="api-proxies/$proxy/pom.xml"
             TEST_FILE="api-proxies/$proxy/tests/integration/PassCollection.json"
 
-            apigeelint -s "$PROXY_DIR" --profile apigeex || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
+            LINT_STATUS="✅"
+            DEPLOY_STATUS="✅"
+            INTEGRATION_STATUS="✅"
 
-            mvn clean install \
+            # ----------------------------
+            # LINT
+            # ----------------------------
+            if ! apigeelint -s "$PROXY_DIR" --profile apigeex; then
+              LINT_STATUS="❌"
+              LINT_FAILED="$LINT_FAILED $proxy"
+              HAS_FAILURE=1
+            fi
+
+            # ----------------------------
+            # DEPLOY
+            # ----------------------------
+            if ! mvn clean install \
               -f "$POM_FILE" \
               -P "$APIGEE_ENVIRONMENT" \
               -Dorg="$ORG" \
-              -Dbearer="$ACCESS_TOKEN" || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
-
-            if [ -f "$TEST_FILE" ]; then
-              newman run "$TEST_FILE" || { FAILED="$FAILED $proxy"; HAS_FAILURE=1; continue; }
+              -Dbearer="$ACCESS_TOKEN"; then
+              DEPLOY_STATUS="❌"
+              DEPLOY_FAILED="$DEPLOY_FAILED $proxy"
+              HAS_FAILURE=1
             fi
 
-            SUCCESS="$SUCCESS $proxy"
+            # ----------------------------
+            # INTEGRATION
+            # ----------------------------
+            if [ -f "$TEST_FILE" ]; then
+              if ! newman run "$TEST_FILE"; then
+                INTEGRATION_STATUS="❌"
+                INTEGRATION_FAILED="$INTEGRATION_FAILED $proxy"
+                HAS_FAILURE=1
+              fi
+            else
+              echo "⚠️ No integration tests found for $proxy"
+            fi
+
+            echo "| $proxy | $LINT_STATUS | $DEPLOY_STATUS | $INTEGRATION_STATUS |" >> lint_report.md
+
+            # Add to success if all stages passed
+            if [ "$LINT_STATUS" = "✅" ] && [ "$DEPLOY_STATUS" = "✅" ] && [ "$INTEGRATION_STATUS" = "✅" ]; then
+              SUCCESS="$SUCCESS $proxy"
+            fi
           done
 
-          echo "SUCCESS=$SUCCESS" >> $GITHUB_ENV
-          echo "FAILED=$FAILED" >> $GITHUB_ENV
-
-          if [ $HAS_FAILURE -eq 1 ]; then
-            echo "❌ One or more proxies failed"
-            exit 1
-          fi
+          echo "SUCCESS=$(echo $SUCCESS | xargs)" >> $GITHUB_ENV
+          echo "LINT_FAILED=$(echo $LINT_FAILED | xargs)" >> $GITHUB_ENV
+          echo "DEPLOY_FAILED=$(echo $DEPLOY_FAILED | xargs)" >> $GITHUB_ENV
+          echo "INTEGRATION_FAILED=$(echo $INTEGRATION_FAILED | xargs)" >> $GITHUB_ENV
+          echo "HAS_FAILURE=$HAS_FAILURE" >> $GITHUB_ENV
 
       # ==========================================================
-      # 8️⃣ FINAL SUMMARY
+      # 8️⃣ FINAL SUMMARY (Enhanced Table)
       # ==========================================================
       - name: Final Summary
         if: always()
         shell: bash
         run: |
           echo "======================================"
-          echo "🚀 DEPLOYMENT SUMMARY"
+          echo "🚀 APIGEE DEPLOYMENT SUMMARY"
           echo "======================================"
           echo ""
           echo "Environment: $APIGEE_ENVIRONMENT"
+          echo "Mode       : ${{ github.event.inputs.deploy_mode }}"
           echo ""
-          echo "✅ SUCCESS:"
+          echo "✅ SUCCESSFUL PROXIES:"
           echo "${SUCCESS:-None}"
           echo ""
-          echo "❌ FAILED:"
-          echo "${FAILED:-None}"
+          echo "❌ LINT FAILED:"
+          echo "${LINT_FAILED:-None}"
+          echo ""
+          echo "❌ DEPLOY FAILED:"
+          echo "${DEPLOY_FAILED:-None}"
+          echo ""
+          echo "❌ INTEGRATION FAILED:"
+          echo "${INTEGRATION_FAILED:-None}"
+          echo ""
+          echo "📊 LINT / DEPLOY / INTEGRATION REPORT:"
+          cat lint_report.md
+          echo ""
 
-
-          
+          if [ "$HAS_FAILURE" = "1" ]; then
+            echo "❌ WORKFLOW STATUS: FAILED"
+            exit 1
+          else
+            echo "✅ WORKFLOW STATUS: SUCCESS"
+          fi
+       
