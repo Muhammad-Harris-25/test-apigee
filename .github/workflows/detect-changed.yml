@@ -16,11 +16,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Detect proxies
         shell: bash
         run: |
-          BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASE="HEAD~1"
+          else
+            BASE="$(git rev-list --max-parents=0 HEAD)"
+          fi
 
           git diff --name-only "$BASE" HEAD \
             | grep '^api-proxies/' \
