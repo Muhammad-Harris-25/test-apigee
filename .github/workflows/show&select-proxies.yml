@@ -9,6 +9,7 @@ on:
         type: choice
         options:
           - dev
+          - demo
           - uat
           - prod
 
@@ -25,7 +26,7 @@ jobs:
     name: Deploy Apigee Proxies
     runs-on: ubuntu-latest
 
-    # 🔒 Environment protection (use approvals for prod)
+    # 🔒 Enable environment approvals (recommended for prod)
     environment:
       name: ${{ github.event.inputs.environment }}
 
@@ -60,11 +61,14 @@ jobs:
           echo "$PROXIES" >> "$GITHUB_ENV"
           echo "EOF" >> "$GITHUB_ENV"
 
-          echo "📦 Available proxies:"
+          echo "======================================"
+          echo "📦 AVAILABLE APIGEE PROXIES"
+          echo "======================================"
           echo "$PROXIES"
+          echo ""
 
       # ==========================================================
-      # 2️⃣ RESOLVE & VALIDATE USER SELECTION
+      # 2️⃣ RESOLVE USER SELECTION (ENTERPRISE CHECKS)
       # ==========================================================
       - name: Resolve selected proxy
         shell: bash
@@ -74,25 +78,45 @@ jobs:
           INPUT="${{ github.event.inputs.proxy }}"
           PROXIES="$AVAILABLE_PROXIES"
 
+          echo "======================================"
+          echo "🧾 PROXY SELECTION VALIDATION"
+          echo "======================================"
+          echo "➡️ User input:"
+          echo "   $INPUT"
+          echo ""
+          echo "📦 Available proxies:"
+          echo "$PROXIES"
+          echo "--------------------------------------"
+
           if [[ "$INPUT" == "ALL" ]]; then
             SELECTED="$PROXIES"
+            echo "✅ User selected ALL proxies"
           else
             if ! echo "$PROXIES" | grep -qx "$INPUT"; then
               echo "❌ Invalid proxy selection: $INPUT"
+              echo ""
+              echo "✅ Allowed values:"
+              echo "$PROXIES"
+              echo ""
+              echo "ℹ️ Tip: Use 'ALL' to deploy all proxies"
               exit 1
             fi
+
             SELECTED="$INPUT"
+            echo "✅ Valid proxy selected: $INPUT"
           fi
+
+          echo "--------------------------------------"
+          echo "🚀 Proxies that will be deployed:"
+          echo "$SELECTED"
+          echo "======================================"
 
           echo "SELECTED_PROXIES<<EOF" >> "$GITHUB_ENV"
           echo "$SELECTED" >> "$GITHUB_ENV"
           echo "EOF" >> "$GITHUB_ENV"
 
-          echo "✅ Selected proxies:"
-          echo "$SELECTED"
-
       # ==========================================================
-      # 3️⃣ LOAD ENV-SCOPED VARIABLES (SAFE)
+      # 3️⃣ LOAD APIGEE CONFIGURATION
       # ==========================================================
       - name: Load Apigee configuration
         shell: bash
@@ -103,37 +127,23 @@ jobs:
           APIGEE_ENVIRONMENT="${{ vars.APIGEE_ENVIRONMENT }}"
           SERVICE_ACCOUNT_FILE="${{ vars.SERVICE_ACCOUNT_FILE }}"
 
-          if [[ -z "$ORG" ]]; then
-            echo "❌ ORG variable missing"
-            exit 1
-          fi
-
-          if [[ -z "$APIGEE_ENVIRONMENT" ]]; then
-            echo "❌ APIGEE_ENVIRONMENT variable missing"
-            exit 1
-          fi
-
-          if [[ -z "$SERVICE_ACCOUNT_FILE" ]]; then
-            echo "❌ SERVICE_ACCOUNT_FILE variable missing"
-            exit 1
-          fi
+          [[ -z "$ORG" ]] && echo "❌ ORG variable missing" && exit 1
+          [[ -z "$APIGEE_ENVIRONMENT" ]] && echo "❌ APIGEE_ENVIRONMENT variable missing" && exit 1
+          [[ -z "$SERVICE_ACCOUNT_FILE" ]] && echo "❌ SERVICE_ACCOUNT_FILE variable missing" && exit 1
 
           echo "ORG=$ORG" >> "$GITHUB_ENV"
           echo "APIGEE_ENVIRONMENT=$APIGEE_ENVIRONMENT" >> "$GITHUB_ENV"
           echo "SERVICE_ACCOUNT_FILE=$SERVICE_ACCOUNT_FILE" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # 4️⃣ AUTHENTICATION (SERVICE ACCOUNT)
+      # 4️⃣ AUTHENTICATION
       # ==========================================================
       - name: Create service account file
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ -z "${{ secrets.SECUREFILE }}" ]]; then
-            echo "❌ SECUREFILE secret not set"
-            exit 1
-          fi
+          [[ -z "${{ secrets.SECUREFILE }}" ]] && echo "❌ SECUREFILE secret not set" && exit 1
 
           echo "${{ secrets.SECUREFILE }}" | base64 --decode > "$SERVICE_ACCOUNT_FILE"
           chmod 600 "$SERVICE_ACCOUNT_FILE"
@@ -141,7 +151,7 @@ jobs:
           echo "🔐 Service account file created"
 
       # ==========================================================
-      # 5️⃣ TOOLCHAIN SETUP
+      # 5️⃣ TOOLCHAIN
       # ==========================================================
       - uses: actions/setup-node@v4
         with:
@@ -176,16 +186,13 @@ jobs:
 
           TOKEN=$(echo "$OUTPUT" | grep -oE 'ya29\.[A-Za-z0-9._-]+')
 
-          if [[ -z "$TOKEN" ]]; then
-            echo "❌ Failed to extract access token"
-            exit 1
-          fi
+          [[ -z "$TOKEN" ]] && echo "❌ Failed to extract access token" && exit 1
 
           echo "ACCESS_TOKEN=$TOKEN" >> "$GITHUB_ENV"
           echo "✅ Access token generated"
 
       # ==========================================================
-      # 7️⃣ LINT → DEPLOY → OPTIONAL TEST
+      # 7️⃣ LINT → DEPLOY → TEST
       # ==========================================================
       - name: Lint, Deploy & Test
         shell: bash
@@ -194,8 +201,11 @@ jobs:
 
           SUCCESS=()
           FAILED=()
+          HAS_FAILURE=0
 
           while read -r proxy; do
+            [[ -z "$proxy" ]] && continue
+
             echo "===================================="
             echo "🚀 Processing proxy: $proxy"
             echo "===================================="
@@ -203,31 +213,31 @@ jobs:
             BASE="api-proxies/$proxy"
 
             if [[ ! -d "$BASE/apiproxy" || ! -f "$BASE/pom.xml" ]]; then
-              echo "❌ Invalid proxy structure: $proxy"
               FAILED+=("$proxy")
+              HAS_FAILURE=1
               continue
             fi
 
-            echo "🧹 Linting..."
             apigeelint -s "$BASE/apiproxy" --profile apigeex || {
               FAILED+=("$proxy")
+              HAS_FAILURE=1
               continue
             }
 
-            echo "🚀 Deploying..."
             mvn clean install -f "$BASE/pom.xml" \
               -P "$APIGEE_ENVIRONMENT" \
               -Dorg="$ORG" \
               -Dbearer="$ACCESS_TOKEN" || {
                 FAILED+=("$proxy")
+                HAS_FAILURE=1
                 continue
               }
 
             TEST_FILE="$BASE/tests/integration/PassCollection.json"
             if [[ -f "$TEST_FILE" ]]; then
-              echo "🧪 Running integration tests..."
               newman run "$TEST_FILE" || {
                 FAILED+=("$proxy")
+                HAS_FAILURE=1
                 continue
               }
             fi
@@ -238,7 +248,7 @@ jobs:
           echo "SUCCESS=${SUCCESS[*]}" >> "$GITHUB_ENV"
           echo "FAILED=${FAILED[*]}" >> "$GITHUB_ENV"
 
-          [[ ${#FAILED[@]} -gt 0 ]] && exit 1
+          [[ $HAS_FAILURE -eq 1 ]] && exit 1 || exit 0
 
       # ==========================================================
       # 8️⃣ FINAL SUMMARY

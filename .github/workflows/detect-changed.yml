@@ -1,39 +1,48 @@
-#name: Apigee - Detect Proxies (Auto)
-#
-#on:
-#  push:
-#    branches: [dev, uat, prod]
-#    paths:
-#      - api-proxies/**
-#
-#permissions:
-#  contents: write
-#
-#jobs:
-#  detect:
-#    runs-on: ubuntu-latest
-#
-#    steps:
-#      - uses: actions/checkout@v4
-#        with:
-##
-#      - name: Detect proxies
- #       shell: bash
-  #      run: |
-   #       BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD)
-#
- #         git diff --name-only "$BASE" HEAD \
-  #          | grep '^api-proxies/' \
-   #         | cut -d'/' -f2 \
-    #        | sort -u > .github/detected_proxies.txt || true
-#
- ##          echo "No proxies detected"
-   #         exit 0
-    #      fi
-#
- #     - name: Commit detected proxies file
-  ###      git config user.name "github-actions"
-     #     git config user.email "github-actions@github.com"
-#
- #         git add .github/detected_proxies.txt
-  ####     git push
+name: Apigee - Detect Proxies (Auto)
+
+on:
+  push:
+    branches: [dev, uat, prod]
+    paths:
+      - api-proxies/**
+
+permissions:
+  contents: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect proxies
+        shell: bash
+        run: |
+          if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            BASE="HEAD~1"
+          else
+            BASE="$(git rev-list --max-parents=0 HEAD)"
+          fi
+
+          git diff --name-only "$BASE" HEAD \
+            | grep '^api-proxies/' \
+            | cut -d'/' -f2 \
+            | sort -u > .github/detected_proxies.txt || true
+
+          if [ ! -s .github/detected_proxies.txt ]; then
+            echo "No proxies detected"
+            exit 0
+          fi
+
+      - name: Commit detected proxies file
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add .github/detected_proxies.txt
+          git commit -m "Auto-detect changed Apigee proxies" || echo "Nothing to commit"
+          git push
